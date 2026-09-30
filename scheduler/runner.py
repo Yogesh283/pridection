@@ -234,9 +234,10 @@ class AnalyzerRunner:
         except Exception:
             pass
 
-        duration = max(0.1, float(hours)) * 3600.0
+        forever = float(hours) <= 0
+        duration = 0.0 if forever else max(0.1, float(hours)) * 3600.0
         started = time.monotonic()
-        end_at = started + duration
+        end_at = None if forever else started + duration
 
         # Quiet noisy info logs on console for clean CLI.
         for handler in logging.getLogger().handlers:
@@ -246,7 +247,10 @@ class AnalyzerRunner:
                 handler.setLevel(logging.ERROR)
 
         print("")
-        print("LIVE Color + Big/Small | Ctrl+C stop")
+        if forever:
+            print("LIVE AUTO forever | Color + Big/Small | Ctrl+C stop")
+        else:
+            print(f"LIVE Color + Big/Small | {hours}h | Ctrl+C stop")
         print("")
 
         # Bootstrap: collect + predict once.
@@ -258,11 +262,12 @@ class AnalyzerRunner:
         if pred:
             self.print_prediction(pred)
 
-        while time.monotonic() < end_at:
+        while end_at is None or time.monotonic() < end_at:
             try:
-                remaining = end_at - time.monotonic()
-                if remaining <= 0:
-                    break
+                if end_at is not None:
+                    remaining = end_at - time.monotonic()
+                    if remaining <= 0:
+                        break
 
                 # Wait until ~10 seconds before expected next result.
                 self._wait_until_near_next_round(PREDICT_LEAD_SECONDS)

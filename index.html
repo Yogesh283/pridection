@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>WinGo 30 — Live Prediction</title>
+  <style>
+    :root {
+      --bg0: #0f1419;
+      --bg1: #1a2332;
+      --line: #2d3a4d;
+      --text: #e8eef7;
+      --muted: #8b9bb4;
+      --big: #3dd68c;
+      --small: #5b9fd4;
+      --red: #e85d5d;
+      --green: #3dd68c;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: "Segoe UI", system-ui, sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(1200px 600px at 10% -10%, #1e3a5f 0%, transparent 55%),
+        radial-gradient(900px 500px at 100% 0%, #243044 0%, transparent 50%),
+        var(--bg0);
+    }
+    main {
+      max-width: 520px;
+      margin: 0 auto;
+      padding: 2.5rem 1.25rem 3rem;
+    }
+    h1 {
+      margin: 0 0 0.35rem;
+      font-size: 1.35rem;
+      letter-spacing: 0.04em;
+      font-weight: 650;
+    }
+    .sub { color: var(--muted); font-size: 0.9rem; margin-bottom: 1.5rem; }
+    .card {
+      background: color-mix(in srgb, var(--bg1) 92%, white 8%);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 1.25rem 1.35rem;
+      margin-bottom: 1rem;
+    }
+    .label { color: var(--muted); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.08em; }
+    .period { font-size: 1.05rem; margin: 0.35rem 0 1rem; word-break: break-all; }
+    .row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0.75rem;
+    }
+    .pill {
+      border-radius: 12px;
+      padding: 0.9rem 0.85rem;
+      border: 1px solid var(--line);
+      background: #121820;
+    }
+    .pill strong { display: block; font-size: 1.45rem; margin-top: 0.25rem; }
+    .BIG { color: var(--big); }
+    .SMALL { color: var(--small); }
+    .RED { color: var(--red); }
+    .GREEN { color: var(--green); }
+    .meta { margin-top: 1rem; font-size: 0.85rem; color: var(--muted); line-height: 1.5; }
+    .err { color: #ffb4b4; font-size: 0.9rem; }
+    .dot {
+      display: inline-block;
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: var(--big);
+      margin-right: 6px;
+      animation: pulse 1.4s infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.35; }
+    }
+    footer { margin-top: 1.25rem; color: var(--muted); font-size: 0.78rem; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>WinGo 30 Live Tip</h1>
+    <p class="sub"><span class="dot"></span>Auto next prediction (refreshes every 3s)</p>
+
+    <div class="card" id="box">
+      <div class="label">Loading…</div>
+    </div>
+
+    <footer>
+      Estimate only — not guaranteed. Long-run Big/Small &amp; Color ~50%.
+      No betting / wallet connection.
+    </footer>
+  </main>
+  <script>
+    async function load() {
+      const box = document.getElementById("box");
+      try {
+        const res = await fetch("prediction.json?ts=" + Date.now(), { cache: "no-store" });
+        if (!res.ok) throw new Error("prediction.json missing — start auto live on server");
+        const d = await res.json();
+        const p = d.prediction || {};
+        const conf = Math.round((d.confidence || 0) * 100);
+        const bs = p.big_small || "—";
+        const color = p.color || "—";
+        const num = p.number;
+        const bsProb = Math.round((d.probabilities?.big_small || 0) * 100);
+        const colProb = Math.round((d.probabilities?.color || 0) * 100);
+        box.innerHTML = `
+          <div class="label">Next period</div>
+          <div class="period">${d.period || "—"}</div>
+          <div class="row">
+            <div class="pill">
+              <div class="label">Big / Small</div>
+              <strong class="${bs}">${bs}</strong>
+              <div class="meta">${bsProb}% tip</div>
+            </div>
+            <div class="pill">
+              <div class="label">Color</div>
+              <strong class="${String(color).split(",")[0]}">${color}</strong>
+              <div class="meta">${colProb}% tip</div>
+            </div>
+          </div>
+          <div class="meta" style="margin-top:1rem">
+            Tip number: <b>${num ?? "—"}</b><br/>
+            Confidence: <b>${d.confidence_level || "—"}</b> (${conf}%)<br/>
+            Updated: ${d.generated_at || "—"}
+          </div>
+        `;
+      } catch (e) {
+        box.innerHTML = `<div class="err">${e.message}</div>
+          <div class="meta">Server pe auto live start karo:<br/>
+          <code>python -u main.py --live 0</code></div>`;
+      }
+    }
+    load();
+    setInterval(load, 3000);
+  </script>
+</body>
+</html>

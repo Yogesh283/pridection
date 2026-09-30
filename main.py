@@ -278,7 +278,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--live",
         type=float,
         metavar="HOURS",
-        help="Live predict+compare+accuracy for N hours (example: --live 1)",
+        help="Live predict forever if 0, else N hours (example: --live 0)",
     )
     parser.add_argument("--stats", action="store_true", help="Show stats and accuracy")
     return parser
