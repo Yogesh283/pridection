@@ -1,4 +1,5 @@
-# Wingo 30 Predictor
+# pridection — Wingo 30 Predictor
+
 
 Statistical / pattern-analysis system for publicly available **Wingo 30** game results.
 
