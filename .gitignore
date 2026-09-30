@@ -5,6 +5,7 @@ __pycache__/
 .env
 *.db
 prediction.json
+live_status.json
 exports/*.csv
 exports/*.json
 exports/*.txt

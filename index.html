@@ -3,6 +3,8 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+  <meta http-equiv="Pragma" content="no-cache" />
   <title>WinGo 30 — Live Prediction</title>
   <style>
     :root {
@@ -15,6 +17,7 @@
       --small: #5b9fd4;
       --red: #e85d5d;
       --green: #3dd68c;
+      --warn: #f0c14b;
     }
     * { box-sizing: border-box; }
     body {
@@ -38,16 +41,25 @@
       letter-spacing: 0.04em;
       font-weight: 650;
     }
-    .sub { color: var(--muted); font-size: 0.9rem; margin-bottom: 1.5rem; }
+    .sub { color: var(--muted); font-size: 0.9rem; margin-bottom: 1.25rem; }
     .card {
       background: color-mix(in srgb, var(--bg1) 92%, white 8%);
       border: 1px solid var(--line);
       border-radius: 14px;
       padding: 1.25rem 1.35rem;
       margin-bottom: 1rem;
+      transition: box-shadow 0.25s ease;
     }
+    .card.flash { box-shadow: 0 0 0 2px var(--big); }
     .label { color: var(--muted); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.08em; }
-    .period { font-size: 1.05rem; margin: 0.35rem 0 1rem; word-break: break-all; }
+    .period { font-size: 1.05rem; margin: 0.35rem 0 0.85rem; word-break: break-all; }
+    .countdown {
+      font-size: 1.8rem;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      margin: 0.2rem 0 1rem;
+      color: var(--warn);
+    }
     .row {
       display: grid;
       grid-template-columns: 1fr 1fr;
@@ -64,7 +76,7 @@
     .SMALL { color: var(--small); }
     .RED { color: var(--red); }
     .GREEN { color: var(--green); }
-    .meta { margin-top: 1rem; font-size: 0.85rem; color: var(--muted); line-height: 1.5; }
+    .meta { margin-top: 0.85rem; font-size: 0.85rem; color: var(--muted); line-height: 1.5; }
     .err { color: #ffb4b4; font-size: 0.9rem; }
     .dot {
       display: inline-block;
@@ -74,6 +86,7 @@
       margin-right: 6px;
       animation: pulse 1.4s infinite;
     }
+    .dot.dead { background: #e85d5d; animation: none; }
     @keyframes pulse {
       0%, 100% { opacity: 1; }
       50% { opacity: 0.35; }
@@ -84,68 +97,116 @@
 <body>
   <main>
     <h1>WinGo 30 Live Tip</h1>
-    <p class="sub"><span class="dot"></span>Auto next prediction (refreshes every 3s)</p>
+    <p class="sub"><span class="dot" id="liveDot"></span><span id="liveText">Connecting…</span></p>
 
     <div class="card" id="box">
       <div class="label">Loading…</div>
     </div>
 
     <footer>
-      Estimate only — not guaranteed. Long-run Big/Small &amp; Color ~50%.
-      No betting / wallet connection.
+      Tip publishes ~12s before settle. Estimate only — not guaranteed.
     </footer>
   </main>
   <script>
-    async function load() {
+    let lastKey = "";
+    let lastGenerated = "";
+
+    function roundCountdown() {
+      // Wall-clock 30s cycle remaining until next settle boundary.
+      const into = Date.now() / 1000 % 30;
+      return Math.max(0, Math.ceil(30 - into));
+    }
+
+    function render(d, status) {
       const box = document.getElementById("box");
-      try {
-        const res = await fetch("prediction.json?ts=" + Date.now(), { cache: "no-store" });
-        if (!res.ok) throw new Error("prediction.json missing — start auto live on server");
-        const d = await res.json();
-        const p = d.prediction || {};
-        const conf = Math.round((d.confidence || 0) * 100);
-        const bs = p.big_small || "—";
-        const color = p.color || "—";
-        const num = p.number;
-        const bsProb = Math.round((d.probabilities?.big_small || 0) * 100);
-        const colProb = Math.round((d.probabilities?.color || 0) * 100);
-        box.innerHTML = `
-          <div class="label">Last settled</div>
-          <div class="period" style="font-size:0.95rem;margin-bottom:0.35rem">
-            ${d.current_period || "—"}
-            <span class="meta"> serial <b>${d.current_serial || "—"}</b></span>
+      const p = d.prediction || {};
+      const conf = Math.round((d.confidence || 0) * 100);
+      const bs = p.big_small || "—";
+      const color = p.color || "—";
+      const num = p.number;
+      const bsProb = Math.round((d.probabilities?.big_small || 0) * 100);
+      const colProb = Math.round((d.probabilities?.color || 0) * 100);
+      const left = roundCountdown();
+      const key = (d.next_period || d.period || "") + "|" + bs + "|" + color + "|" + num;
+      const changed = key && key !== lastKey;
+      lastKey = key;
+      lastGenerated = d.generated_at || lastGenerated;
+
+      box.className = "card" + (changed ? " flash" : "");
+      box.innerHTML = `
+        <div class="label">Result in</div>
+        <div class="countdown">${left}s</div>
+        <div class="label">Last settled</div>
+        <div class="period" style="font-size:0.95rem;margin-bottom:0.35rem">
+          ${d.current_period || "—"}
+          <span class="meta"> serial <b>${d.current_serial || "—"}</b></span>
+        </div>
+        <div class="label">Next tip (before result)</div>
+        <div class="period">
+          ${d.next_period || d.period || "—"}
+          <span class="meta"> serial <b>${d.next_serial || "—"}</b></span>
+        </div>
+        <div class="row">
+          <div class="pill">
+            <div class="label">Big / Small</div>
+            <strong class="${bs}">${bs}</strong>
+            <div class="meta">${bsProb}% tip</div>
           </div>
-          <div class="label">Next period (tip for)</div>
-          <div class="period">
-            ${d.next_period || d.period || "—"}
-            <span class="meta"> serial <b>${d.next_serial || "—"}</b></span>
+          <div class="pill">
+            <div class="label">Color</div>
+            <strong class="${String(color).split(",")[0]}">${color}</strong>
+            <div class="meta">${colProb}% tip</div>
           </div>
-          <div class="row">
-            <div class="pill">
-              <div class="label">Big / Small</div>
-              <strong class="${bs}">${bs}</strong>
-              <div class="meta">${bsProb}% tip</div>
-            </div>
-            <div class="pill">
-              <div class="label">Color</div>
-              <strong class="${String(color).split(",")[0]}">${color}</strong>
-              <div class="meta">${colProb}% tip</div>
-            </div>
-          </div>
-          <div class="meta" style="margin-top:1rem">
-            Tip number: <b>${num ?? "—"}</b><br/>
-            Confidence: <b>${d.confidence_level || "—"}</b> (${conf}%)<br/>
-            Updated: ${d.generated_at || "—"}
-          </div>
-        `;
-      } catch (e) {
-        box.innerHTML = `<div class="err">${e.message}</div>
-          <div class="meta">Server pe auto live start karo:<br/>
-          <code>python -u main.py --live 0</code></div>`;
+        </div>
+        <div class="meta">
+          Tip number: <b>${num ?? "—"}</b><br/>
+          Confidence: <b>${d.confidence_level || "—"}</b> (${conf}%)<br/>
+          Updated: ${d.generated_at || "—"}
+        </div>
+      `;
+      if (changed) setTimeout(() => box.classList.remove("flash"), 600);
+
+      const dot = document.getElementById("liveDot");
+      const liveText = document.getElementById("liveText");
+      const age = status?.server_time
+        ? Math.max(0, Math.floor(Date.now() / 1000 - status.server_time))
+        : (d.generated_at ? Math.max(0, Math.floor((Date.now() - Date.parse(d.generated_at)) / 1000)) : null);
+      if (age != null && age < 90) {
+        dot.className = "dot";
+        liveText.textContent = `LIVE auto tip · refresh 1s · server ${age}s ago`;
+      } else {
+        dot.className = "dot dead";
+        liveText.textContent = age == null
+          ? "Waiting for live worker…"
+          : `LIVE stalled (${age}s) — restart main.py --live 0`;
       }
     }
+
+    async function load() {
+      try {
+        const bust = "ts=" + Date.now();
+        const [predRes, statusRes] = await Promise.all([
+          fetch("prediction.json?" + bust, { cache: "no-store" }),
+          fetch("live_status.json?" + bust, { cache: "no-store" }).catch(() => null),
+        ]);
+        if (!predRes.ok) throw new Error("prediction.json missing — start auto live on server");
+        const d = await predRes.json();
+        let status = null;
+        if (statusRes && statusRes.ok) {
+          try { status = await statusRes.json(); } catch (_) {}
+        }
+        render(d, status);
+      } catch (e) {
+        document.getElementById("box").innerHTML =
+          `<div class="err">${e.message}</div>
+           <div class="meta">Server:<br/><code>python -u main.py --live 0</code></div>`;
+        document.getElementById("liveDot").className = "dot dead";
+        document.getElementById("liveText").textContent = "Offline";
+      }
+    }
+
     load();
-    setInterval(load, 3000);
+    setInterval(load, 1000);
   </script>
 </body>
 </html>

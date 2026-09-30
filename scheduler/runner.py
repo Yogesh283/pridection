@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import time
+from datetime import datetime, timezone
 from typing import Any
 
 from rich.console import Console
@@ -11,10 +13,10 @@ from rich.console import Console
 from analysis.accuracy import compute_accuracy_report
 from analysis.statistics import big_small_label
 from api.client import primary_color
-from config import MIN_SAMPLE_FOR_ACCURACY_CLAIM, POLL_INTERVAL_SECONDS
+from api.history_sync import guess_next_period, sync_history_into_db
+from config import MIN_SAMPLE_FOR_ACCURACY_CLAIM, POLL_INTERVAL_SECONDS, ROOT_DIR
 from data.collector import Collector
 from data.database import Database
-from api.history_sync import guess_next_period, sync_history_into_db
 from models.ensemble import (
     EnsemblePredictor,
     build_prediction_export,
@@ -25,9 +27,29 @@ logger = logging.getLogger(__name__)
 console = Console()
 
 # Predict roughly this many seconds before the next expected settle.
-PREDICT_LEAD_SECONDS = 10.0
+PREDICT_LEAD_SECONDS = 12.0
 ROUND_SECONDS = 30.0
-FAST_POLL_SECONDS = 2.0
+FAST_POLL_SECONDS = 1.0
+
+
+def seconds_until_predict_window(
+    round_seconds: float = ROUND_SECONDS,
+    lead_seconds: float = PREDICT_LEAD_SECONDS,
+) -> float:
+    """
+    Align to wall-clock 30s boundaries.
+
+    Wake ~lead_seconds before the next settle (:00/:30), so tip is published
+    before the result appears on the game.
+    """
+    now = time.time()
+    into = now % round_seconds
+    target = max(1.0, round_seconds - float(lead_seconds))
+    if into <= target:
+        wait = target - into
+    else:
+        wait = round_seconds - into + target
+    return max(0.5, wait)
 
 
 class AnalyzerRunner:
@@ -167,6 +189,7 @@ class AnalyzerRunner:
             target_period, result, current_period=current_period
         )
         write_prediction_json(export)
+        self._write_live_status(export)
         self.last_prediction_period = target_period
 
         resolved = self.db.get_resolved_predictions()
@@ -217,14 +240,31 @@ class AnalyzerRunner:
             self.print_prediction(prediction_bundle)
 
     def _wait_until_near_next_round(self, seconds_before: float = PREDICT_LEAD_SECONDS) -> None:
-        """Sleep until ~10s before next expected 30s settle, then return."""
-        wait = max(1.0, ROUND_SECONDS - seconds_before)
+        """Sleep until ~lead seconds before next 30s wall-clock settle."""
+        wait = seconds_until_predict_window(ROUND_SECONDS, seconds_before)
         time.sleep(wait)
 
     def _poll_until_new_period(self, previous_period: str | None, timeout: float = 45.0) -> dict[str, Any]:
-        """Fast-poll API until a new settled period appears or timeout."""
+        """Fast-poll history+dear until a new settled period appears or timeout."""
+        from api.history_sync import sync_history_into_db
+
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
+            try:
+                sync = sync_history_into_db(self.db)
+                latest = sync.get("latest") or {}
+                period = latest.get("period")
+                if period and period != previous_period:
+                    return {
+                        "ok": True,
+                        "current": {
+                            "period": period,
+                            "number": latest.get("number"),
+                            "color": latest.get("color"),
+                        },
+                    }
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("hist poll: %s", exc)
             summary = self.collector.collect_once()
             current = (summary.get("current") or {}) if summary.get("ok") else {}
             period = current.get("period")
@@ -232,6 +272,24 @@ class AnalyzerRunner:
                 return summary
             time.sleep(FAST_POLL_SECONDS)
         return self.collector.collect_once()
+
+    def _write_live_status(self, export: dict[str, Any] | None = None) -> None:
+        """Heartbeat JSON for the website (auto-refresh health)."""
+        from pathlib import Path
+
+        payload = {
+            "ok": True,
+            "server_time": time.time(),
+            "server_time_iso": datetime.now(timezone.utc)
+            .replace(microsecond=0)
+            .isoformat(),
+            "last_seen_period": self.last_seen_period,
+            "last_prediction_period": self.last_prediction_period,
+            "seconds_to_predict_window": round(seconds_until_predict_window(), 1),
+            "prediction": export,
+        }
+        path = Path(ROOT_DIR) / "live_status.json"
+        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
     def run_live(self, hours: float = 1.0) -> None:
         """
