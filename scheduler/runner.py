@@ -69,6 +69,8 @@ class AnalyzerRunner:
         self.schema_paused = False
         self.last_prediction_period: str | None = None
         self.last_seen_period: str | None = None
+        self._ml_trained = False
+        self._last_export: dict[str, Any] | None = None
 
     def resolve_pending(self) -> list[dict[str, Any]]:
         """Resolve open predictions; return comparison rows for CLI."""
@@ -141,10 +143,15 @@ class AnalyzerRunner:
         # Keep live terminal clean — no rolling win/lost spam.
         return
 
-    def generate_prediction(self, force: bool = True) -> dict[str, Any] | None:
+    def generate_prediction(
+        self, force: bool = True, *, train_ml: bool | None = None
+    ) -> dict[str, Any] | None:
         # Prefer official history CDN for correct issueNumber / serial.
         try:
-            sync_history_into_db(self.db)
+            sync = sync_history_into_db(self.db)
+            synced = (sync.get("latest") or {}).get("period")
+            if synced:
+                self.last_seen_period = str(synced)
         except Exception as exc:  # noqa: BLE001
             logger.warning("history sync failed: %s", exc)
 
@@ -155,22 +162,37 @@ class AnalyzerRunner:
 
         latest = rounds[-1]
         current_period = str(latest["period"])
+        self.last_seen_period = current_period
         target_period = guess_next_period(current_period)
+
+        # Skip rewrite if tip already matches latest settled + 1.
+        if (
+            not force
+            and self.last_prediction_period == target_period
+        ):
+            return None
 
         if not force:
             for pending in self.db.get_unresolved_predictions():
                 if pending["target_period"] == target_period:
                     return None
 
+        do_train = (
+            bool(train_ml)
+            if train_ml is not None
+            else not getattr(self, "_ml_trained", False)
+        )
         result = self.predictor.predict(
             rounds,
             historical_number_accuracy=self.historical_number_accuracy(),
             historical_big_small_accuracy=self.historical_big_small_accuracy(),
-            train_ml=True,
+            train_ml=do_train,
             focus="big_small",
         )
         if not result:
             return None
+        if do_train:
+            self._ml_trained = True
 
         pred_id = self.db.save_prediction(
             {
@@ -189,8 +211,9 @@ class AnalyzerRunner:
             target_period, result, current_period=current_period
         )
         write_prediction_json(export)
-        self._write_live_status(export)
         self.last_prediction_period = target_period
+        self._last_export = export
+        self._write_live_status(export)
 
         resolved = self.db.get_resolved_predictions()
         if resolved:
@@ -293,15 +316,13 @@ class AnalyzerRunner:
 
     def run_live(self, hours: float = 1.0) -> None:
         """
-        Live loop for N hours:
-        1) store API result into MySQL
-        2) compare previous prediction vs actual (CLI)
-        3) update live accuracy
-        4) predict next period ~10s before settle
+        Fast live loop (1s ticks):
+        - sync official history issueNumber every tick
+        - as soon as serial changes, publish NEXT tip immediately
+        - heartbeat live_status.json so the website auto-refreshes
         """
         import sys
 
-        # Force line-buffered CLI output on Windows.
         try:
             sys.stdout.reconfigure(line_buffering=True)  # type: ignore[attr-defined]
         except Exception:
@@ -312,7 +333,6 @@ class AnalyzerRunner:
         started = time.monotonic()
         end_at = None if forever else started + duration
 
-        # Quiet noisy info logs on console for clean CLI.
         for handler in logging.getLogger().handlers:
             if isinstance(handler, logging.StreamHandler) and not isinstance(
                 handler, logging.FileHandler
@@ -321,66 +341,78 @@ class AnalyzerRunner:
 
         print("")
         if forever:
-            print("LIVE AUTO forever | Color + Big/Small | Ctrl+C stop")
+            print("LIVE AUTO forever | 1s hist sync | Ctrl+C stop")
         else:
-            print(f"LIVE Color + Big/Small | {hours}h | Ctrl+C stop")
+            print(f"LIVE {hours}h | 1s hist sync | Ctrl+C stop")
         print("")
 
-        # Bootstrap: collect + predict once.
-        summary = self.collector.collect_once()
-        latest = self.db.get_latest_round()
-        self.last_seen_period = latest["period"] if latest else None
+        self._ml_trained = False
+        self.collector.collect_once()
         self.resolve_pending()
-        pred = self.generate_prediction(force=True)
+        pred = self.generate_prediction(force=True, train_ml=True)
         if pred:
             self.print_prediction(pred)
 
+        last_published_current: str | None = None
+        if pred and pred.get("latest"):
+            last_published_current = str(pred["latest"]["period"])
+
         while end_at is None or time.monotonic() < end_at:
             try:
-                if end_at is not None:
-                    remaining = end_at - time.monotonic()
-                    if remaining <= 0:
-                        break
+                # Sync authoritative serial from history CDN.
+                try:
+                    sync = sync_history_into_db(self.db)
+                    latest = sync.get("latest") or {}
+                    current_period = latest.get("period")
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("tick sync failed: %s", exc)
+                    current_period = None
+                    latest = {}
 
-                # Wait until ~10 seconds before expected next result.
-                self._wait_until_near_next_round(PREDICT_LEAD_SECONDS)
+                if not current_period:
+                    self.collector.collect_once()
+                    row = self.db.get_latest_round()
+                    if row:
+                        current_period = str(row["period"])
+                        latest = {
+                            "period": current_period,
+                            "number": row.get("number"),
+                            "color": row.get("color"),
+                        }
 
-                # Refresh prediction shortly before settle (same open row, update in place).
-                # Do NOT create a second prediction row.
-                self.collector.collect_once()
-                current = self.db.get_latest_round()
-                if current and self.last_seen_period and current["period"] != self.last_seen_period:
-                    # New result already arrived during wait.
-                    self.last_seen_period = str(current["period"])
-                    self.resolve_pending()
-                    nxt = self.generate_prediction(force=True)
-                    if nxt:
-                        self.print_prediction(nxt)
-                    continue
+                if current_period:
+                    self.last_seen_period = str(current_period)
+                    expected_next = guess_next_period(str(current_period))
 
-                pred = self.generate_prediction(force=True)
-                if pred:
-                    self.print_prediction(pred)
+                    # New settled round -> resolve + fresh next tip immediately.
+                    if current_period != last_published_current:
+                        self.resolve_pending()
+                        nxt = self.generate_prediction(force=True, train_ml=False)
+                        if nxt:
+                            self.print_prediction(nxt)
+                            last_published_current = str(
+                                (nxt.get("latest") or {}).get("period")
+                                or current_period
+                            )
+                        else:
+                            last_published_current = str(current_period)
+                    elif self.last_prediction_period != expected_next:
+                        nxt = self.generate_prediction(force=True, train_ml=False)
+                        if nxt:
+                            self.print_prediction(nxt)
+                            last_published_current = str(current_period)
+                    else:
+                        # Heartbeat only — keeps website "LIVE" indicator fresh.
+                        self._write_live_status(self._last_export)
 
-                # Poll until new result arrives, then compare silently.
-                summary = self._poll_until_new_period(self.last_seen_period, timeout=40.0)
-                current = (summary.get("current") or {}) if summary.get("ok") else {}
-                period = current.get("period")
-                if period and period != self.last_seen_period:
-                    self.last_seen_period = str(period)
-                    self.resolve_pending()
-                    nxt = self.generate_prediction(force=True)
-                    if nxt:
-                        self.print_prediction(nxt)
-
+                time.sleep(1.0)
             except KeyboardInterrupt:
                 print("\nStopped.")
                 break
             except Exception as exc:
                 logger.exception("Live loop error: %s", exc)
-                time.sleep(5.0)
+                time.sleep(2.0)
 
-        self.db.export_csv()
         print("Live finished.")
 
     def run_forever(self, stop_after: int | None = None) -> None:
