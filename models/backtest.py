@@ -13,10 +13,10 @@ from models.predictor import FrequencyModel, MarkovModel, PatternModel, RecentWe
 
 
 def _guess_next_period(period: str) -> str:
-    if period.isdigit():
-        width = len(period)
-        return str(int(period) + 1).zfill(width)
-    return f"{period}+1"
+    """Next issueNumber; keep in sync with api.history_sync.guess_next_period."""
+    from api.history_sync import guess_next_period
+
+    return guess_next_period(period)
 
 
 def backtest_history(

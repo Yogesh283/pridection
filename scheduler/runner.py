@@ -14,7 +14,7 @@ from api.client import primary_color
 from config import MIN_SAMPLE_FOR_ACCURACY_CLAIM, POLL_INTERVAL_SECONDS
 from data.collector import Collector
 from data.database import Database
-from models.backtest import _guess_next_period
+from api.history_sync import guess_next_period, sync_history_into_db
 from models.ensemble import (
     EnsemblePredictor,
     build_prediction_export,
@@ -120,13 +120,20 @@ class AnalyzerRunner:
         return
 
     def generate_prediction(self, force: bool = True) -> dict[str, Any] | None:
+        # Prefer official history CDN for correct issueNumber / serial.
+        try:
+            sync_history_into_db(self.db)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("history sync failed: %s", exc)
+
         rounds = self.db.get_rounds()
         if len(rounds) < 5:
             print("DB mein 5 rounds se kam hain — wait...")
             return None
 
         latest = rounds[-1]
-        target_period = _guess_next_period(str(latest["period"]))
+        current_period = str(latest["period"])
+        target_period = guess_next_period(current_period)
 
         if not force:
             for pending in self.db.get_unresolved_predictions():
@@ -156,7 +163,9 @@ class AnalyzerRunner:
             },
             update_existing=True,
         )
-        export = build_prediction_export(target_period, result)
+        export = build_prediction_export(
+            target_period, result, current_period=current_period
+        )
         write_prediction_json(export)
         self.last_prediction_period = target_period
 
@@ -180,10 +189,16 @@ class AnalyzerRunner:
         }
 
     def print_prediction(self, bundle: dict[str, Any]) -> None:
+        from api.history_sync import period_serial
+
         result = bundle["result"]
+        target = str(bundle["target_period"])
+        current = str((bundle.get("latest") or {}).get("period") or "")
         print("")
         print("---------- PREDICT ----------")
-        print(f"Period    : {bundle['target_period']}")
+        if current:
+            print(f"Settled   : {current} (serial {period_serial(current)})")
+        print(f"Next      : {target} (serial {period_serial(target)})")
         print(f"Big/Small : {result['top_big_small']}")
         print(f"Color     : {result['top_color']}")
         print(
@@ -329,7 +344,7 @@ def run_dashboard_snapshot(db: Database | None = None) -> None:
         if result:
             latest = rounds[-1]
             prediction = {
-                "target_period": _guess_next_period(str(latest["period"])),
+                "target_period": guess_next_period(str(latest["period"])),
                 "result": result,
                 "latest": latest,
             }

@@ -110,8 +110,16 @@
         const bsProb = Math.round((d.probabilities?.big_small || 0) * 100);
         const colProb = Math.round((d.probabilities?.color || 0) * 100);
         box.innerHTML = `
-          <div class="label">Next period</div>
-          <div class="period">${d.period || "—"}</div>
+          <div class="label">Last settled</div>
+          <div class="period" style="font-size:0.95rem;margin-bottom:0.35rem">
+            ${d.current_period || "—"}
+            <span class="meta"> serial <b>${d.current_serial || "—"}</b></span>
+          </div>
+          <div class="label">Next period (tip for)</div>
+          <div class="period">
+            ${d.next_period || d.period || "—"}
+            <span class="meta"> serial <b>${d.next_serial || "—"}</b></span>
+          </div>
           <div class="row">
             <div class="pill">
               <div class="label">Big / Small</div>

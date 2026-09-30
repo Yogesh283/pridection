@@ -565,9 +565,19 @@ def write_prediction_json(
 def build_prediction_export(
     target_period: str,
     ensemble_result: dict[str, Any],
+    *,
+    current_period: str | None = None,
 ) -> dict[str, Any]:
+    from api.history_sync import period_serial
+
+    current = str(current_period) if current_period else None
+    target = str(target_period)
     return {
-        "period": target_period,
+        "period": target,
+        "next_period": target,
+        "next_serial": period_serial(target),
+        "current_period": current,
+        "current_serial": period_serial(current) if current else None,
         "focus": ensemble_result.get("focus", PREDICTION_FOCUS),
         "prediction": {
             "big_small": ensemble_result["top_big_small"],

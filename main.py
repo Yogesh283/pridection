@@ -29,7 +29,6 @@ from models.ensemble import (
     build_prediction_export,
     write_prediction_json,
 )
-from models.backtest import _guess_next_period
 from scheduler.runner import AnalyzerRunner, run_dashboard_snapshot
 
 
@@ -106,13 +105,21 @@ def cmd_predict() -> int:
                 actual_color=actual.get("color"),
             )
 
+    from api.history_sync import guess_next_period, sync_history_into_db
+
+    try:
+        sync_history_into_db(db)
+    except Exception as exc:  # noqa: BLE001
+        print(f"history sync note: {exc}")
+
     rounds = db.get_rounds()
     if len(rounds) < 5:
         print("Data kam hai. Pehle collect chalao.")
         return 1
 
     latest = rounds[-1]
-    target = _guess_next_period(str(latest["period"]))
+    current = str(latest["period"])
+    target = guess_next_period(current)
 
     predictor = EnsemblePredictor()
     resolved = db.get_resolved_predictions()
@@ -133,7 +140,7 @@ def cmd_predict() -> int:
         print("Prediction nahi ban payi.")
         return 1
 
-    export = build_prediction_export(target, result)
+    export = build_prediction_export(target, result, current_period=current)
     write_prediction_json(export)
     db.save_prediction(
         {

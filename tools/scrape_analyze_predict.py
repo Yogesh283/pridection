@@ -23,7 +23,6 @@ from analysis.accuracy import compute_accuracy_report
 from analysis.statistics import big_small_label, streak_length, summarize_rounds
 from api.client import WingoAPIClient, primary_color
 from data.database import Database
-from models.backtest import _guess_next_period
 from models.ensemble import EnsemblePredictor, build_prediction_export, write_prediction_json
 from models.predictor import MajorityWindowModel
 
@@ -183,10 +182,19 @@ def analyze_data(rounds: list[dict]) -> dict:
 
 
 def predict_next(db: Database, rounds: list[dict]) -> dict | None:
+    from api.history_sync import guess_next_period, sync_history_into_db
+
+    try:
+        sync_history_into_db(db)
+        rounds = db.get_rounds()
+    except Exception as exc:  # noqa: BLE001
+        print(f"  history sync note: {exc}")
+
     if len(rounds) < 5:
         return None
     latest = rounds[-1]
-    target = _guess_next_period(str(latest["period"]))
+    current = str(latest["period"])
+    target = guess_next_period(current)
     hist_bs = None
     resolved = db.get_resolved_predictions()
     if resolved:
@@ -201,7 +209,9 @@ def predict_next(db: Database, rounds: list[dict]) -> dict | None:
     )
     if not result:
         return None
-    write_prediction_json(build_prediction_export(target, result))
+    write_prediction_json(
+        build_prediction_export(target, result, current_period=current)
+    )
     db.save_prediction(
         {
             "target_period": target,
