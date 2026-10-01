@@ -218,23 +218,56 @@ class EnsemblePredictor:
             total += 1
         return (hits / total) if total else 0.5
 
-    def _pick_big_small(self, history: list[dict[str, Any]]) -> tuple[str, dict[str, float], str]:
+    def _pick_big_small(
+        self, history: list[dict[str, Any]]
+    ) -> tuple[str, dict[str, float], str, bool]:
         """
-        Live Big/Small: majority window only.
+        Selective Big/Small (tuned on local walk-forward ~952 rounds):
 
-        ML / follow / anti-streak switches looked confident but tracked ~coin-flip
-        on this market — keep the tip simple and honest.
+        1) If last BS streak >= 3 -> flip (anti-streak)
+        2) Else if majority(window=8) margin >= 2 votes -> take majority
+        3) Else skip tip (weak/tie) so published accuracy can rise a bit
+
+        Returns: top, probs, source, skip
         """
-        maj_out = self.majority.predict(history)
-        maj_bs = {k: float(v) for k, v in maj_out["big_small"].items()}
-        if "top_big_small" in maj_out:
-            top = str(maj_out["top_big_small"])
-        else:
-            top = max(maj_bs, key=maj_bs.get)
-        return top, _normalize(maj_bs), "majority_bs"
+        labels = [big_small_label(int(r["number"])) for r in history]
+        last = labels[-1]
+        streak_n = 0
+        for x in reversed(labels):
+            if x == last:
+                streak_n += 1
+            else:
+                break
+
+        if streak_n >= 3:
+            top = "SMALL" if last == "BIG" else "BIG"
+            other = last
+            return top, _normalize({top: 0.58, other: 0.42}), "anti_streak3", False
+
+        window = labels[-8:] if len(labels) >= 8 else labels
+        from collections import Counter
+
+        counts = Counter(window)
+        big_n = int(counts.get("BIG", 0))
+        small_n = int(counts.get("SMALL", 0))
+        if big_n == small_n:
+            # weak tie -> skip
+            tip = "SMALL" if last == "BIG" else "BIG"
+            return tip, {"BIG": 0.5, "SMALL": 0.5}, "tie_skip", True
+        top = "BIG" if big_n > small_n else "SMALL"
+        margin = abs(big_n - small_n)
+        probs = _normalize(
+            {
+                "BIG": (big_n + 1) / (len(window) + 2),
+                "SMALL": (small_n + 1) / (len(window) + 2),
+            }
+        )
+        if margin < 2:
+            return top, probs, "weak_majority_skip", True
+        return top, probs, "strong_majority", False
 
     def _pick_color(self, history: list[dict[str, Any]]) -> tuple[str, dict[str, float], str]:
-        """Live Color: majority window (RED/GREEN), no cold-flip override."""
+        """Color kept for internal metrics only (UI is Big/Small-only)."""
         maj_out = self.majority.predict(history)
         maj_col = {
             k: float(v) for k, v in maj_out["colors"].items() if k in ("RED", "GREEN")
@@ -385,6 +418,7 @@ class EnsemblePredictor:
         top_color = color_predictions[0]["color"]
         top_big_small = big_small_predictions[0]["big_small"]
         bs_source = "ensemble"
+        skip_tip = False
 
         maj_out = self.majority.predict(history)
         maj_nums = maj_out["numbers"]
@@ -424,8 +458,8 @@ class EnsemblePredictor:
             bs_source = "number_ensemble"
             conf_nums = {int(k): float(v) for k, v in number_probs.items()}
         else:
-            # Adaptive Big/Small + Color (switches when majority goes cold).
-            top_big_small, maj_bs, bs_source = self._pick_big_small(history)
+            # Selective Big/Small (skip weak ties) + color for internal only.
+            top_big_small, maj_bs, bs_source, skip_tip = self._pick_big_small(history)
             top_color, maj_col, color_source = self._pick_color(history)
             bs_source = f"{bs_source}+{color_source}"
             big_small_predictions = [
@@ -471,6 +505,11 @@ class EnsemblePredictor:
             big_small_probs={str(k): float(v) for k, v in maj_bs.items()},
             focus=focus,
         )
+        if skip_tip:
+            confidence["confidence_level"] = "LOW"
+            confidence["confidence_score"] = min(
+                float(confidence["confidence_score"]), 0.45
+            )
 
         return {
             "focus": focus,
@@ -481,6 +520,7 @@ class EnsemblePredictor:
             "top_color": top_color,
             "top_big_small": top_big_small,
             "bs_source": bs_source,
+            "skip_tip": bool(skip_tip),
             "number_probability": next(
                 p["probability"]
                 for p in number_predictions
@@ -538,6 +578,8 @@ def build_prediction_export(
     current = str(current_period) if current_period else None
     target = str(target_period)
     acc = live_accuracy or {}
+    skip = bool(ensemble_result.get("skip_tip"))
+    tip_bs = None if skip else ensemble_result["top_big_small"]
     return {
         "period": target,
         "next_period": target,
@@ -545,8 +587,10 @@ def build_prediction_export(
         "current_period": current,
         "current_serial": period_serial(current) if current else None,
         "focus": "big_small",
+        "skip": skip,
+        "action": "WAIT" if skip else "TIP",
         "prediction": {
-            "big_small": ensemble_result["top_big_small"],
+            "big_small": tip_bs,
         },
         "probabilities": {
             "big_small": ensemble_result["big_small_probability"],
@@ -558,8 +602,8 @@ def build_prediction_export(
         "live_accuracy": {
             "big_small_pct": acc.get("big_small_accuracy"),
             "sample": acc.get("total_predictions"),
-            "note": "Big/Small only. Long-run ~50% is normal.",
+            "note": "Only strong tips counted. Weak/tie rounds show WAIT.",
         },
         "generated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
-        "disclaimer": "Big/Small estimate only — not number or color.",
+        "disclaimer": "Big/Small only. WAIT = weak signal skipped for better tip quality.",
     }

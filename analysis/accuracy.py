@@ -18,11 +18,17 @@ def _pct(correct: int, total: int) -> float:
 def _big_small_correct_flag(row: dict[str, Any]) -> int:
     if row.get("big_small_correct") is not None:
         return int(row["big_small_correct"])
-    pred_n = row.get("predicted_number")
     act_n = row.get("actual_number")
-    if pred_n is None or act_n is None:
+    if act_n is None:
         return 0
-    return int(big_small_label(int(pred_n)) == big_small_label(int(act_n)))
+    actual_bs = big_small_label(int(act_n))
+    pred_bs = row.get("predicted_big_small") or row.get("actual_big_small")
+    if pred_bs:
+        return int(str(pred_bs).upper() == actual_bs)
+    pred_n = row.get("predicted_number")
+    if pred_n is None:
+        return 0
+    return int(big_small_label(int(pred_n)) == actual_bs)
 
 
 def window_accuracy(rows: list[dict[str, Any]], n: int) -> dict[str, float]:

@@ -116,10 +116,10 @@
       const box = document.getElementById("box");
       const p = d.prediction || {};
       const conf = Math.round((d.confidence || 0) * 100);
-      const bs = p.big_small || "—";
+      const bs = (d.skip || d.action === "WAIT") ? "WAIT" : (p.big_small || "—");
       const bsProb = Math.round((d.probabilities?.big_small || 0) * 100);
       const left = roundCountdown();
-      const key = (d.next_period || d.period || "") + "|" + bs;
+      const key = (d.next_period || d.period || "") + "|" + bs + "|" + (d.action || "");
       const changed = key && key !== lastKey;
       lastKey = key;
 
@@ -138,13 +138,13 @@
           <span class="meta"> serial <b>${d.next_serial || "—"}</b></span>
         </div>
         <div class="tip">
-          <div class="label">Prediction</div>
-          <strong class="${bs}">${bs}</strong>
-          <div class="meta">${bsProb}% tip share</div>
+          <div class="label">${d.skip ? "No clear signal" : "Prediction"}</div>
+          <strong class="${bs === "WAIT" ? "" : bs}">${bs}</strong>
+          <div class="meta">${d.skip ? "Skipped weak/tie round" : (bsProb + "% tip share")}</div>
         </div>
         <div class="meta">
-          Confidence: <b>${d.confidence_level || "—"}</b> (${conf}%) · ${d.strategy || "majority_bs"}<br/>
-          Real settled BS accuracy:
+          Confidence: <b>${d.confidence_level || "—"}</b> (${conf}%) · ${d.strategy || "—"}<br/>
+          Real settled BS accuracy (strong tips only):
           <b>${d.live_accuracy?.big_small_pct != null ? Number(d.live_accuracy.big_small_pct).toFixed(1) + "%" : "—"}</b>
           <span>(n=${d.live_accuracy?.sample ?? 0})</span><br/>
           Updated: ${d.generated_at || "—"}

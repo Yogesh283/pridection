@@ -194,19 +194,6 @@ class AnalyzerRunner:
         if do_train:
             self._ml_trained = True
 
-        pred_id = self.db.save_prediction(
-            {
-                "target_period": target_period,
-                "predicted_number": result["top_number"],
-                "predicted_color": result["top_color"],
-                "predicted_big_small": result["top_big_small"],
-                "number_probability": result["number_probability"],
-                "color_probability": result["color_probability"],
-                "big_small_probability": result["big_small_probability"],
-                "model_name": "ensemble",
-            },
-            update_existing=True,
-        )
         resolved = self.db.get_resolved_predictions()
         live_acc = compute_accuracy_report(resolved) if resolved else None
         export = build_prediction_export(
@@ -220,14 +207,30 @@ class AnalyzerRunner:
         self._last_export = export
         self._write_live_status(export)
 
-        if live_acc:
-            self.db.upsert_model_metrics(
-                "ensemble",
-                sample_size=live_acc["total_predictions"],
-                number_accuracy=live_acc["number_accuracy"],
-                color_accuracy=live_acc["color_accuracy"],
-                big_small_accuracy=live_acc.get("big_small_accuracy", 0.0),
+        # Weak/tie signals: show WAIT on site, do NOT save as scored tip.
+        pred_id = None
+        if not result.get("skip_tip"):
+            pred_id = self.db.save_prediction(
+                {
+                    "target_period": target_period,
+                    "predicted_number": result["top_number"],
+                    "predicted_color": result["top_color"],
+                    "predicted_big_small": result["top_big_small"],
+                    "number_probability": result["number_probability"],
+                    "color_probability": result["color_probability"],
+                    "big_small_probability": result["big_small_probability"],
+                    "model_name": "ensemble",
+                },
+                update_existing=True,
             )
+            if live_acc:
+                self.db.upsert_model_metrics(
+                    "ensemble",
+                    sample_size=live_acc["total_predictions"],
+                    number_accuracy=live_acc["number_accuracy"],
+                    color_accuracy=live_acc["color_accuracy"],
+                    big_small_accuracy=live_acc.get("big_small_accuracy", 0.0),
+                )
 
         return {
             "prediction_id": pred_id,
@@ -235,6 +238,7 @@ class AnalyzerRunner:
             "result": result,
             "export": export,
             "latest": latest,
+            "skipped": bool(result.get("skip_tip")),
         }
 
     def print_prediction(self, bundle: dict[str, Any]) -> None:
@@ -248,11 +252,15 @@ class AnalyzerRunner:
         if current:
             print(f"Settled   : {current} (serial {period_serial(current)})")
         print(f"Next      : {target} (serial {period_serial(target)})")
-        print(f"Big/Small : {result['top_big_small']}")
+        if result.get("skip_tip") or bundle.get("skipped"):
+            print("Big/Small : WAIT (weak/tie — tip skipped)")
+        else:
+            print(f"Big/Small : {result['top_big_small']}")
         print(
             f"Conf      : {result['confidence_level']} "
             f"({result['confidence_score'] * 100:.0f}%)"
         )
+        print(f"Strategy  : {result.get('bs_source')}")
         print("---------------------------------------------")
         print("")
 
