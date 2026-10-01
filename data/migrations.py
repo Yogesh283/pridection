@@ -74,6 +74,10 @@ ALTER_COLUMNS = [
     ("predictions", "model_version", "VARCHAR(128) NULL"),
     ("predictions", "trained_until_period", "VARCHAR(64) NULL"),
     ("predictions", "trained_rows", "INT NULL"),
+    ("predictions", "probability_big", "DOUBLE NULL"),
+    ("predictions", "probability_small", "DOUBLE NULL"),
+    ("predictions", "decision_threshold", "DOUBLE NULL"),
+    ("predictions", "locked_at", "VARCHAR(64) NULL"),
 ]
 
 
@@ -92,6 +96,21 @@ def _column_exists(cur: Any, table: str, column: str) -> bool:
     return int(row["c"] if isinstance(row, dict) else row[0]) > 0
 
 
+def _index_exists(cur: Any, table: str, index_name: str) -> bool:
+    cur.execute(
+        """
+        SELECT COUNT(*) AS c
+        FROM information_schema.STATISTICS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = %s
+          AND INDEX_NAME = %s
+        """,
+        (table, index_name),
+    )
+    row = cur.fetchone()
+    return int(row["c"] if isinstance(row, dict) else row[0]) > 0
+
+
 def apply_migrations(conn: Any) -> None:
     with conn.cursor() as cur:
         for statement in SCHEMA_STATEMENTS:
@@ -101,3 +120,17 @@ def apply_migrations(conn: Any) -> None:
                 cur.execute(
                     f"ALTER TABLE `{table}` ADD COLUMN `{column}` {coltype}"
                 )
+        # Best-effort unique identity for round-lock (target + model + version).
+        # Duplicates are collapsed first where possible.
+        if not _index_exists(cur, "predictions", "uq_predictions_period_model_ver"):
+            try:
+                cur.execute(
+                    """
+                    ALTER TABLE predictions
+                    ADD UNIQUE KEY uq_predictions_period_model_ver
+                    (target_period, model_name, model_version)
+                    """
+                )
+            except Exception:
+                # Existing duplicate keys — application-level lock still enforces immutability.
+                pass

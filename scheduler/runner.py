@@ -203,6 +203,62 @@ class AnalyzerRunner:
         ):
             return None
 
+        from models.prediction_lock import (
+            get_prediction_lock_cache,
+            locked_row_to_result,
+        )
+
+        cache = get_prediction_lock_cache()
+        locked_db = self.db.get_open_prediction(target_period)
+        locked_tip = None
+        if locked_db and locked_db.get("predicted_big_small"):
+            locked_tip = locked_db
+        elif not self.db.period_exists(target_period):
+            # Memory cache only while the target round is still open.
+            cached = cache.get(target_period)
+            if cached and cached.get("predicted_big_small"):
+                locked_tip = cached
+        else:
+            # Settled period — drop stale cache so it cannot replay an old tip.
+            cache.clear_period(target_period)
+
+        # ROUND LOCK: never recalculate an already-locked tip (even if force=True).
+        if locked_tip:
+            result = locked_row_to_result(locked_tip)
+            decision = str(result.get("decision_strategy") or result.get("model_name"))
+            resolved = self.db.get_resolved_predictions()
+            model_resolved = [
+                row
+                for row in resolved
+                if str(row.get("decision_strategy") or row.get("model_name") or "")
+                == decision
+            ]
+            live_acc = (
+                compute_accuracy_report(model_resolved) if model_resolved else None
+            )
+            export = build_prediction_export(
+                target_period,
+                result,
+                current_period=current_period,
+                live_accuracy=live_acc,
+            )
+            export["model_status"] = self.predictor.production.status()
+            export["round_locked"] = True
+            write_prediction_json(export)
+            self.last_prediction_period = target_period
+            self._last_export = export
+            self._write_live_status(export)
+            latest_row = self.db.get_round_by_period(current_period) or rounds[-1]
+            return {
+                "prediction_id": locked_db.get("id") if locked_db else None,
+                "target_period": target_period,
+                "result": result,
+                "export": export,
+                "latest": latest_row,
+                "skipped": bool(result.get("skip_tip")),
+                "round_locked": True,
+            }
+
         if not force:
             for pending in self.db.get_unresolved_predictions():
                 if pending["target_period"] == target_period:
@@ -240,33 +296,48 @@ class AnalyzerRunner:
             live_accuracy=live_acc,
         )
         export["model_status"] = self.predictor.production.status()
+        export["round_locked"] = False
         write_prediction_json(export)
         self.last_prediction_period = target_period
         self._last_export = export
         self._write_live_status(export)
 
-        # Save every opportunity. WAIT rows remain explicitly unscored and provide
-        # the denominator needed for honest high-confidence coverage.
+        # Persist once — subsequent polls return the locked row above.
         pred_id = None
-        if result.get("model_name"):
-            pred_id = self.db.save_prediction(
+        if result.get("model_name") and not result.get("skip_tip"):
+            tip_payload = {
+                "target_period": target_period,
+                "predicted_number": result.get("top_number"),
+                "predicted_color": result.get("top_color"),
+                "predicted_big_small": result.get("top_big_small"),
+                "number_probability": result.get("number_probability"),
+                "color_probability": result.get("color_probability"),
+                "big_small_probability": result.get("big_small_probability")
+                or result.get("confidence_score"),
+                "probability_big": result.get("probability_big"),
+                "probability_small": result.get("probability_small"),
+                "decision_threshold": result.get("decision_threshold")
+                or (self.predictor.production.artifact or {}).get("decision_threshold"),
+                "model_name": result.get("model_name") or decision,
+                "model_version": result.get("model_version"),
+                "decision_strategy": decision,
+                "trained_until_period": result.get("trained_until_period"),
+                "trained_rows": result.get("trained_on_rows"),
+                "status": "TIP",
+            }
+            pred_id = self.db.save_prediction(tip_payload, update_existing=True)
+            cache.put(
                 {
-                    "target_period": target_period,
-                    "predicted_number": result.get("top_number"),
-                    "predicted_color": result.get("top_color"),
-                    "predicted_big_small": result.get("top_big_small"),
-                    "number_probability": result.get("number_probability"),
-                    "color_probability": result.get("color_probability"),
-                    "big_small_probability": result.get("big_small_probability"),
-                    "model_name": result.get("model_name") or decision,
-                    "model_version": result.get("model_version"),
-                    "decision_strategy": decision,
-                    "trained_until_period": result.get("trained_until_period"),
-                    "trained_rows": result.get("trained_on_rows"),
-                    "status": "WAIT" if result.get("skip_tip") else "TIP",
-                },
-                update_existing=True,
+                    **tip_payload,
+                    "confidence": tip_payload["big_small_probability"],
+                    "confidence_level": result.get("confidence_level"),
+                    "trained_on_rows": tip_payload.get("trained_rows"),
+                }
             )
+            export["round_locked"] = True
+            write_prediction_json(export)
+            self._last_export = export
+            self._write_live_status(export)
             if live_acc:
                 self.db.upsert_model_metrics(
                     decision,
@@ -275,6 +346,21 @@ class AnalyzerRunner:
                     color_accuracy=live_acc["color_accuracy"],
                     big_small_accuracy=float(live_acc.get("big_small_accuracy") or 0.0),
                 )
+        elif result.get("model_name") and result.get("skip_tip"):
+            # WAIT / unavailable — do not lock a fake tip.
+            pred_id = self.db.save_prediction(
+                {
+                    "target_period": target_period,
+                    "predicted_number": result.get("top_number"),
+                    "predicted_color": result.get("top_color"),
+                    "predicted_big_small": None,
+                    "model_name": result.get("model_name") or decision,
+                    "model_version": result.get("model_version"),
+                    "decision_strategy": decision,
+                    "status": "WAIT",
+                },
+                update_existing=True,
+            )
 
         latest_row = self.db.get_round_by_period(current_period) or rounds[-1]
         return {
@@ -284,6 +370,7 @@ class AnalyzerRunner:
             "export": export,
             "latest": latest_row,
             "skipped": bool(result.get("skip_tip")),
+            "round_locked": bool(export.get("round_locked")),
         }
 
     def print_prediction(self, bundle: dict[str, Any]) -> None:
@@ -500,12 +587,13 @@ class AnalyzerRunner:
                         else:
                             last_published_current = str(current_period)
                     elif self.last_prediction_period != expected_next:
+                        # Missing tip for open next period — create once (lock prevents flip).
                         nxt = self.generate_prediction(force=True, train_ml=False)
                         if nxt:
                             self.print_prediction(nxt)
                             last_published_current = str(current_period)
                     else:
-                        # Heartbeat only — keeps website "LIVE" indicator fresh.
+                        # Heartbeat only — sync period/status; do NOT re-infer tip.
                         self._write_live_status(self._last_export)
 
                 time.sleep(1.0)
@@ -524,21 +612,14 @@ class AnalyzerRunner:
 
 def run_dashboard_snapshot(db: Database | None = None) -> None:
     runner = AnalyzerRunner(db=db or Database())
-    rounds = runner.db.get_rounds()
+    # Use round-locked generate_prediction — never bypass with raw model.predict.
+    bundle = runner.generate_prediction(force=True, train_ml=False)
     prediction = None
-    if len(rounds) >= 5:
-        result = runner.predictor.predict(
-            rounds,
-            historical_number_accuracy=runner.historical_number_accuracy(),
-            historical_big_small_accuracy=runner.historical_big_small_accuracy(),
-            train_ml=True,
-            focus="big_small",
-        )
-        if result:
-            latest = rounds[-1]
-            prediction = {
-                "target_period": guess_next_period(str(latest["period"])),
-                "result": result,
-                "latest": latest,
-            }
+    if bundle:
+        prediction = {
+            "target_period": bundle.get("target_period"),
+            "result": bundle.get("result"),
+            "latest": bundle.get("latest"),
+            "round_locked": bundle.get("round_locked"),
+        }
     runner.render_dashboard(prediction)

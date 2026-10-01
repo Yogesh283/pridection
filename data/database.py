@@ -283,24 +283,71 @@ class Database:
     def period_exists(self, period: str) -> bool:
         return self.get_round_by_period(period) is not None
 
+    def get_open_prediction(self, target_period: str) -> dict[str, Any] | None:
+        """Return the single open (unresolved) prediction for a target period."""
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT * FROM predictions
+                    WHERE target_period = %s AND resolved_at IS NULL
+                    ORDER BY id ASC
+                    LIMIT 1
+                    """,
+                    (str(target_period),),
+                )
+                return cur.fetchone()
+
+    def get_prediction_by_period(
+        self, target_period: str, *, include_resolved: bool = True
+    ) -> dict[str, Any] | None:
+        """Latest prediction row for a target period (open preferred)."""
+        open_row = self.get_open_prediction(target_period)
+        if open_row:
+            return open_row
+        if not include_resolved:
+            return None
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT * FROM predictions
+                    WHERE target_period = %s
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    (str(target_period),),
+                )
+                return cur.fetchone()
+
     def save_prediction(self, prediction: dict[str, Any], update_existing: bool = True) -> int:
+        """
+        Persist a tip. Round-lock: once an open tip has predicted_big_small set,
+        tip/probability fields are NEVER overwritten (even if update_existing=True).
+        """
         created_at = prediction.get("created_at") or _utcnow_iso()
         predicted_number = prediction.get("predicted_number")
         predicted_big_small = prediction.get("predicted_big_small")
-        # WAIT / no-tip: keep predicted_big_small NULL (do not invent from number).
         status = prediction.get("status") or (
             "WAIT" if predicted_big_small is None else "TIP"
         )
         decision = prediction.get("decision_strategy") or prediction.get("model_name") or "unknown"
         model_name = prediction.get("model_name") or decision
         pred_color = canonical_color(prediction.get("predicted_color"), predicted_number)
+        locked_at = prediction.get("locked_at") or created_at
+        p_big = prediction.get("probability_big")
+        p_small = prediction.get("probability_small")
+        thr = prediction.get("decision_threshold")
 
         with self.connect() as conn:
             with conn.cursor() as cur:
                 # Keep only one open prediction per target period.
                 cur.execute(
                     """
-                    SELECT id FROM predictions
+                    SELECT id, predicted_big_small, status, locked_at,
+                           probability_big, probability_small, big_small_probability,
+                           model_name, model_version
+                    FROM predictions
                     WHERE target_period = %s AND resolved_at IS NULL
                     ORDER BY id ASC
                     """,
@@ -314,13 +361,19 @@ class Database:
                             "DELETE FROM predictions WHERE id = %s",
                             (int(row["id"]),),
                         )
-                    existing = {"id": keep_id}
+                    existing = existing_rows[0]
+                    existing = {**existing, "id": keep_id}
                 elif existing_rows:
                     existing = existing_rows[0]
                 else:
                     existing = None
 
                 if existing:
+                    # ROUND LOCK: immutable tip once set.
+                    existing_tip = existing.get("predicted_big_small")
+                    already_locked = existing_tip is not None and str(existing_tip).strip() != ""
+                    if already_locked:
+                        return int(existing["id"])
                     if update_existing:
                         cur.execute(
                             """
@@ -331,14 +384,19 @@ class Database:
                                 number_probability = %s,
                                 color_probability = %s,
                                 big_small_probability = %s,
+                                probability_big = %s,
+                                probability_small = %s,
+                                decision_threshold = %s,
                                 model_name = %s,
                                 model_version = %s,
                                 decision_strategy = %s,
                                 trained_until_period = %s,
                                 trained_rows = %s,
                                 status = %s,
-                                created_at = %s
+                                locked_at = COALESCE(locked_at, %s),
+                                created_at = COALESCE(created_at, %s)
                             WHERE id = %s AND resolved_at IS NULL
+                              AND (predicted_big_small IS NULL OR predicted_big_small = '')
                             """,
                             (
                                 predicted_number,
@@ -347,12 +405,16 @@ class Database:
                                 prediction.get("number_probability"),
                                 prediction.get("color_probability"),
                                 prediction.get("big_small_probability"),
+                                p_big,
+                                p_small,
+                                thr,
                                 model_name,
                                 prediction.get("model_version"),
                                 decision,
                                 prediction.get("trained_until_period"),
                                 prediction.get("trained_rows"),
                                 status,
+                                locked_at if predicted_big_small else None,
                                 created_at,
                                 int(existing["id"]),
                             ),
@@ -365,9 +427,10 @@ class Database:
                         target_period, predicted_number, predicted_color,
                         predicted_big_small,
                         number_probability, color_probability, big_small_probability,
+                        probability_big, probability_small, decision_threshold,
                         model_name, model_version, decision_strategy,
-                        trained_until_period, trained_rows, status, created_at
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        trained_until_period, trained_rows, status, locked_at, created_at
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         prediction["target_period"],
@@ -377,12 +440,16 @@ class Database:
                         prediction.get("number_probability"),
                         prediction.get("color_probability"),
                         prediction.get("big_small_probability"),
+                        p_big,
+                        p_small,
+                        thr,
                         model_name,
                         prediction.get("model_version"),
                         decision,
                         prediction.get("trained_until_period"),
                         prediction.get("trained_rows"),
                         status,
+                        locked_at if predicted_big_small else None,
                         created_at,
                     ),
                 )
@@ -456,6 +523,7 @@ class Database:
                     big_small_correct = 1 if pred_bs == actual_bs else 0
                     status = "RESOLVED"
 
+                # Settlement only writes actual/score fields — tip stays immutable.
                 cur.execute(
                     """
                     UPDATE predictions
@@ -468,6 +536,7 @@ class Database:
                         status = %s,
                         resolved_at = %s
                     WHERE id = %s
+                      AND (resolved_at IS NULL OR %s = 1)
                     """,
                     (
                         actual_number,
@@ -479,6 +548,7 @@ class Database:
                         status,
                         _utcnow_iso(),
                         prediction_id,
+                        1 if force else 0,
                     ),
                 )
                 logger.info(
@@ -488,6 +558,14 @@ class Database:
                     status,
                     big_small_correct,
                 )
+                try:
+                    from models.prediction_lock import get_prediction_lock_cache
+
+                    get_prediction_lock_cache().clear_period(
+                        str(row.get("target_period") or "")
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
                 return {
                     "ok": True,
                     "reason": "resolved",

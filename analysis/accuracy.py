@@ -123,6 +123,36 @@ def compute_accuracy_report(resolved: list[dict[str, Any]]) -> dict[str, Any]:
         }
 
     insufficient = bs_n < MIN_SAMPLE_FOR_ACCURACY_CLAIM
+
+    # Class metrics on scored tips only.
+    tip_big = [r for r in scored if str(r.get("predicted_big_small") or "").upper() == "BIG"]
+    tip_small = [
+        r for r in scored if str(r.get("predicted_big_small") or "").upper() == "SMALL"
+    ]
+    act_big = [
+        r for r in scored if str(r.get("actual_big_small") or "").upper() == "BIG"
+        or (
+            r.get("actual_number") is not None
+            and big_small_label(int(r["actual_number"])) == "BIG"
+        )
+    ]
+    act_small = [
+        r for r in scored if str(r.get("actual_big_small") or "").upper() == "SMALL"
+        or (
+            r.get("actual_number") is not None
+            and big_small_label(int(r["actual_number"])) == "SMALL"
+        )
+    ]
+    tp_big = sum(1 for r in tip_big if _big_small_correct_flag(r) == 1)
+    tp_small = sum(1 for r in tip_small if _big_small_correct_flag(r) == 1)
+    big_prec = _pct(tp_big, len(tip_big))
+    small_prec = _pct(tp_small, len(tip_small))
+    big_rec = _pct(tp_big, len(act_big))
+    small_rec = _pct(tp_small, len(act_small))
+    tpr = (tp_big / len(act_big)) if act_big else 0.0
+    tnr = (tp_small / len(act_small)) if act_small else 0.0
+    balanced = 100.0 * 0.5 * (tpr + tnr) if (act_big or act_small) else 0.0
+
     return {
         "total_predictions": total,
         "correct_numbers": number_correct,
@@ -136,11 +166,21 @@ def compute_accuracy_report(resolved: list[dict[str, Any]]) -> dict[str, Any]:
         "big_small_accuracy": _pct(bs_correct, bs_n),
         "big_small_scored": bs_n,
         "wait_excluded": wait_n,
+        "big_precision": big_prec,
+        "small_precision": small_prec,
+        "big_recall": big_rec,
+        "small_recall": small_rec,
+        "balanced_accuracy": round(balanced, 2),
+        "predicted_big": len(tip_big),
+        "predicted_small": len(tip_small),
+        "actual_big": len(act_big),
+        "actual_small": len(act_small),
         "last_10": window_accuracy(resolved, 10),
         "last_20": window_accuracy(resolved, 20),
         "last_25": window_accuracy(resolved, 25),
         "last_50": window_accuracy(resolved, 50),
         "last_100": window_accuracy(resolved, 100),
+        "last_200": window_accuracy(resolved, 200),
         "overall": {
             "sample_size": total,
             "number_accuracy": _pct(number_correct, total),

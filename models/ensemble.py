@@ -235,6 +235,7 @@ class EnsemblePredictor:
                 if available
                 else "UNAVAILABLE"
             ),
+            "decision_threshold": output.get("decision_threshold"),
             "model_agreement": None,
             "adaptive_weights": dict(
                 (self.production.artifact or {}).get("weights", {})
