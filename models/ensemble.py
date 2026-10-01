@@ -138,12 +138,14 @@ def compute_confidence(
 
     if sample_size < MIN_SAMPLE_FOR_ACCURACY_CLAIM:
         level = "LOW"
-    elif score < 0.38:
+    elif score < 0.45:
         level = "LOW"
-    elif score < 0.62:
-        level = "MEDIUM"
     else:
-        level = "HIGH"
+        # Never advertise HIGH on this near-random market.
+        level = "MEDIUM"
+    # Cap displayed confidence near tip probability (avoid "74% sure" look).
+    tip_cap = 0.50 + min(0.12, max(0.0, top_p - 0.50) * 1.2)
+    score = float(max(0.05, min(tip_cap, score, 0.62)))
 
     return {
         "confidence_score": round(score, 4),
@@ -218,65 +220,27 @@ class EnsemblePredictor:
 
     def _pick_big_small(self, history: list[dict[str, Any]]) -> tuple[str, dict[str, float], str]:
         """
-        Big/Small picker:
-        1) Dedicated ML BS models when trained and probability edge >= 8%
-        2) Else follow last / anti-streak3
+        Live Big/Small: majority window only.
+
+        ML / follow / anti-streak switches looked confident but tracked ~coin-flip
+        on this market — keep the tip simple and honest.
         """
-        # Ensure ML has a chance to train on current history.
-        if not self.ml.trained and len(history) >= 200:
-            self.maybe_train_ml(history)
-
-        ml_out = self.ml.predict(history) if self.ml.trained else None
-        if ml_out and ml_out.get("big_small"):
-            bs = {k: float(v) for k, v in ml_out["big_small"].items()}
-            top = max(bs, key=bs.get)
-            edge = abs(float(bs.get(top, 0.5)) - 0.5)
-            if edge >= 0.08:
-                return str(top), _normalize(bs), "ml_bs"
-
-        last = big_small_label(int(history[-1]["number"]))
-        flip = "SMALL" if last == "BIG" else "BIG"
-        top = last
-        source = "follow_last"
-        if len(history) >= 3:
-            a = big_small_label(int(history[-1]["number"]))
-            b = big_small_label(int(history[-2]["number"]))
-            c = big_small_label(int(history[-3]["number"]))
-            if a == b == c:
-                top = flip
-                source = "anti_streak3"
-        other = "SMALL" if top == "BIG" else "BIG"
-        maj_bs = {top: 0.58, other: 0.42}
-        return top, _normalize(maj_bs), source
+        maj_out = self.majority.predict(history)
+        maj_bs = {k: float(v) for k, v in maj_out["big_small"].items()}
+        if "top_big_small" in maj_out:
+            top = str(maj_out["top_big_small"])
+        else:
+            top = max(maj_bs, key=maj_bs.get)
+        return top, _normalize(maj_bs), "majority_bs"
 
     def _pick_color(self, history: list[dict[str, Any]]) -> tuple[str, dict[str, float], str]:
-        """
-        Adaptive Color (RED/GREEN):
-        - Default: majority window
-        - If majority cold on last ~20: flip last color (stronger on recent stretch)
-        """
+        """Live Color: majority window (RED/GREEN), no cold-flip override."""
         maj_out = self.majority.predict(history)
         maj_col = {
             k: float(v) for k, v in maj_out["colors"].items() if k in ("RED", "GREEN")
         } or {k: float(v) for k, v in maj_out["colors"].items()}
         top = max(maj_col, key=maj_col.get)
-        source = "majority_color"
-        last = primary_color(history[-1].get("color"))
-        if not last:
-            last = "RED" if int(history[-1]["number"]) % 2 == 0 else "GREEN"
-        flip = "GREEN" if last == "RED" else "RED"
-
-        col_rate = self._color_maj_hit_rate(history, self._regime_window)
-        if col_rate < self._cold_threshold:
-            top = flip
-            other = last
-            maj_col = {top: 0.58, other: 0.42}
-            source = "flip_color_cold"
-
-        other = "GREEN" if top == "RED" else "RED"
-        if top not in maj_col or other not in maj_col:
-            maj_col = {top: float(maj_col.get(top, 0.58)), other: float(maj_col.get(other, 0.42))}
-        return str(top), _normalize({"RED": maj_col.get("RED", 0.0), "GREEN": maj_col.get("GREEN", 0.0)}), source
+        return str(top), _normalize(maj_col), "majority_color"
 
     def maybe_train_ml(self, history: list[dict[str, Any]]) -> None:
         if len(history) < 200:
@@ -567,11 +531,13 @@ def build_prediction_export(
     ensemble_result: dict[str, Any],
     *,
     current_period: str | None = None,
+    live_accuracy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     from api.history_sync import period_serial
 
     current = str(current_period) if current_period else None
     target = str(target_period)
+    acc = live_accuracy or {}
     return {
         "period": target,
         "next_period": target,
@@ -592,6 +558,14 @@ def build_prediction_export(
         "confidence": ensemble_result["confidence_score"],
         "confidence_level": ensemble_result["confidence_level"],
         "model_agreement": ensemble_result.get("model_agreement"),
+        "strategy": ensemble_result.get("bs_source"),
+        "live_accuracy": {
+            "big_small_pct": acc.get("big_small_accuracy"),
+            "color_pct": acc.get("color_accuracy"),
+            "sample": acc.get("total_predictions"),
+            "note": "Settled tips only — long-run ~50% is normal for this game.",
+        },
         "generated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
-        "disclaimer": ensemble_result.get("disclaimer"),
+        "disclaimer": ensemble_result.get("disclaimer")
+        or "Estimate only. This is not a guaranteed next result.",
     }

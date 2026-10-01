@@ -207,23 +207,26 @@ class AnalyzerRunner:
             },
             update_existing=True,
         )
+        resolved = self.db.get_resolved_predictions()
+        live_acc = compute_accuracy_report(resolved) if resolved else None
         export = build_prediction_export(
-            target_period, result, current_period=current_period
+            target_period,
+            result,
+            current_period=current_period,
+            live_accuracy=live_acc,
         )
         write_prediction_json(export)
         self.last_prediction_period = target_period
         self._last_export = export
         self._write_live_status(export)
 
-        resolved = self.db.get_resolved_predictions()
-        if resolved:
-            report = compute_accuracy_report(resolved)
+        if live_acc:
             self.db.upsert_model_metrics(
                 "ensemble",
-                sample_size=report["total_predictions"],
-                number_accuracy=report["number_accuracy"],
-                color_accuracy=report["color_accuracy"],
-                big_small_accuracy=report.get("big_small_accuracy", 0.0),
+                sample_size=live_acc["total_predictions"],
+                number_accuracy=live_acc["number_accuracy"],
+                color_accuracy=live_acc["color_accuracy"],
+                big_small_accuracy=live_acc.get("big_small_accuracy", 0.0),
             )
 
         return {

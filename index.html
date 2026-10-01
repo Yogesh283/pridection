@@ -104,7 +104,8 @@
     </div>
 
     <footer>
-      Tip publishes ~12s before settle. Estimate only — not guaranteed.
+      Tip is an estimate only. Real settled accuracy above — long-run ~50% is normal.
+      HIGH confidence is disabled on purpose (this market is near-random).
     </footer>
   </main>
   <script>
@@ -158,12 +159,16 @@
             <div class="meta">${colProb}% tip</div>
           </div>
         </div>
-        <div class="meta">
-          Tip number: <b>${num ?? "—"}</b><br/>
-          Confidence: <b>${d.confidence_level || "—"}</b> (${conf}%)<br/>
-          Updated: ${d.generated_at || "—"}
-        </div>
-      `;
+          <div class="meta">
+            Tip number: <b>${num ?? "—"}</b><br/>
+            Confidence: <b>${d.confidence_level || "—"}</b> (${conf}%) · strategy ${d.strategy || "—"}<br/>
+            Real settled accuracy:
+            BS <b>${d.live_accuracy?.big_small_pct != null ? Number(d.live_accuracy.big_small_pct).toFixed(1) + "%" : "—"}</b>
+            · Color <b>${d.live_accuracy?.color_pct != null ? Number(d.live_accuracy.color_pct).toFixed(1) + "%" : "—"}</b>
+            <span>(n=${d.live_accuracy?.sample ?? 0})</span><br/>
+            Updated: ${d.generated_at || "—"}
+          </div>
+        `;
       if (changed) setTimeout(() => box.classList.remove("flash"), 600);
 
       const dot = document.getElementById("liveDot");
