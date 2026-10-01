@@ -10,7 +10,8 @@ from analysis.statistics import big_small_label
 # WinGo 30s: 30 minutes ≈ 60 settled rounds.
 ANALYSIS_ROUNDS_30M = 60
 # Need a clearer majority on a long window (not just 1–2 vote edge).
-MIN_MARGIN_30M = 6
+# Soft edge on 60-round window (e.g. 32 vs 28). Stricter values cause constant WAIT.
+MIN_MARGIN_30M = 4
 
 
 def analyze_big_small(

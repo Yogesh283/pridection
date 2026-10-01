@@ -357,9 +357,13 @@ class AnalyzerRunner:
         print("")
 
         self._ml_trained = False
-        self.collector.collect_once()
+        # Prefer official history CDN only (dearapi often times out on this server).
+        try:
+            sync_history_into_db(self.db)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("bootstrap hist sync failed: %s", exc)
         self.resolve_pending()
-        pred = self.generate_prediction(force=True, train_ml=True)
+        pred = self.generate_prediction(force=True, train_ml=False)
         if pred:
             self.print_prediction(pred)
 
@@ -380,7 +384,6 @@ class AnalyzerRunner:
                     latest = {}
 
                 if not current_period:
-                    self.collector.collect_once()
                     row = self.db.get_latest_round()
                     if row:
                         current_period = str(row["period"])
@@ -420,7 +423,7 @@ class AnalyzerRunner:
                 print("\nStopped.")
                 break
             except Exception as exc:
-                logger.exception("Live loop error: %s", exc)
+                logger.exception("Live loop error: %s",exc)
                 time.sleep(2.0)
 
         print("Live finished.")
