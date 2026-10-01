@@ -293,20 +293,15 @@ def main() -> int:
     r = pred["result"]
     print(f"  Period      : {pred['target']}")
     print(f"  Big/Small   : {r['top_big_small']}")
-    print(f"  Color       : {r['top_color']}")
-    print(f"  Tip number  : {r['top_number']} (also due-digit hint: {report['due_digit']})")
     print(
         f"  Confidence  : {r['confidence_level']} "
         f"({r['confidence_score'] * 100:.0f}%)"
     )
-    print(
-        f"  Prob        : BS {r['big_small_probability'] * 100:.0f}% | "
-        f"Color {r['color_probability'] * 100:.0f}%"
-    )
+    print(f"  Prob        : BS {r['big_small_probability'] * 100:.0f}%")
     if r.get("bs_source"):
         print(f"  Strategy    : {r['bs_source']}")
     print("\n  Saved -> prediction.json")
-    print("  Note: estimate only; long-run BS/Color tends ~50%.")
+    print("  Note: Big/Small only — estimate ~50% long-run.")
     print("=" * 56)
     return 0
 
