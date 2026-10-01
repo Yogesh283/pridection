@@ -244,17 +244,16 @@ class AnalyzerRunner:
         target = str(bundle["target_period"])
         current = str((bundle.get("latest") or {}).get("period") or "")
         print("")
-        print("---------- PREDICT ----------")
+        print("---------- PREDICT (Big/Small only) ----------")
         if current:
             print(f"Settled   : {current} (serial {period_serial(current)})")
         print(f"Next      : {target} (serial {period_serial(target)})")
         print(f"Big/Small : {result['top_big_small']}")
-        print(f"Color     : {result['top_color']}")
         print(
             f"Conf      : {result['confidence_level']} "
             f"({result['confidence_score'] * 100:.0f}%)"
         )
-        print("-----------------------------")
+        print("---------------------------------------------")
         print("")
 
     def print_comparison(self, row: dict[str, Any]) -> None:

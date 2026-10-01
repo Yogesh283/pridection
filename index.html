@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
   <meta http-equiv="Pragma" content="no-cache" />
-  <title>WinGo 30 — Live Prediction</title>
+  <title>WinGo 30 — Big / Small Live</title>
   <style>
     :root {
       --bg0: #0f1419;
@@ -15,8 +15,6 @@
       --muted: #8b9bb4;
       --big: #3dd68c;
       --small: #5b9fd4;
-      --red: #e85d5d;
-      --green: #3dd68c;
       --warn: #f0c14b;
     }
     * { box-sizing: border-box; }
@@ -60,22 +58,21 @@
       margin: 0.2rem 0 1rem;
       color: var(--warn);
     }
-    .row {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 0.75rem;
-    }
-    .pill {
-      border-radius: 12px;
-      padding: 0.9rem 0.85rem;
+    .tip {
+      border-radius: 14px;
+      padding: 1.2rem 1rem;
       border: 1px solid var(--line);
       background: #121820;
+      text-align: center;
     }
-    .pill strong { display: block; font-size: 1.45rem; margin-top: 0.25rem; }
+    .tip strong {
+      display: block;
+      font-size: 2.4rem;
+      margin-top: 0.35rem;
+      letter-spacing: 0.06em;
+    }
     .BIG { color: var(--big); }
     .SMALL { color: var(--small); }
-    .RED { color: var(--red); }
-    .GREEN { color: var(--green); }
     .meta { margin-top: 0.85rem; font-size: 0.85rem; color: var(--muted); line-height: 1.5; }
     .err { color: #ffb4b4; font-size: 0.9rem; }
     .dot {
@@ -96,7 +93,7 @@
 </head>
 <body>
   <main>
-    <h1>WinGo 30 Live Tip</h1>
+    <h1>WinGo 30 — Big / Small</h1>
     <p class="sub"><span class="dot" id="liveDot"></span><span id="liveText">Connecting…</span></p>
 
     <div class="card" id="box">
@@ -104,16 +101,13 @@
     </div>
 
     <footer>
-      Tip is an estimate only. Real settled accuracy above — long-run ~50% is normal.
-      HIGH confidence is disabled on purpose (this market is near-random).
+      Only Big / Small tip. Number &amp; Color disabled. Estimate only — long-run ~50% normal.
     </footer>
   </main>
   <script>
     let lastKey = "";
-    let lastGenerated = "";
 
     function roundCountdown() {
-      // Wall-clock 30s cycle remaining until next settle boundary.
       const into = Date.now() / 1000 % 30;
       return Math.max(0, Math.ceil(30 - into));
     }
@@ -123,15 +117,11 @@
       const p = d.prediction || {};
       const conf = Math.round((d.confidence || 0) * 100);
       const bs = p.big_small || "—";
-      const color = p.color || "—";
-      const num = p.number;
       const bsProb = Math.round((d.probabilities?.big_small || 0) * 100);
-      const colProb = Math.round((d.probabilities?.color || 0) * 100);
       const left = roundCountdown();
-      const key = (d.next_period || d.period || "") + "|" + bs + "|" + color + "|" + num;
+      const key = (d.next_period || d.period || "") + "|" + bs;
       const changed = key && key !== lastKey;
       lastKey = key;
-      lastGenerated = d.generated_at || lastGenerated;
 
       box.className = "card" + (changed ? " flash" : "");
       box.innerHTML = `
@@ -142,33 +132,24 @@
           ${d.current_period || "—"}
           <span class="meta"> serial <b>${d.current_serial || "—"}</b></span>
         </div>
-        <div class="label">Next tip (before result)</div>
+        <div class="label">Next tip (Big / Small only)</div>
         <div class="period">
           ${d.next_period || d.period || "—"}
           <span class="meta"> serial <b>${d.next_serial || "—"}</b></span>
         </div>
-        <div class="row">
-          <div class="pill">
-            <div class="label">Big / Small</div>
-            <strong class="${bs}">${bs}</strong>
-            <div class="meta">${bsProb}% tip</div>
-          </div>
-          <div class="pill">
-            <div class="label">Color</div>
-            <strong class="${String(color).split(",")[0]}">${color}</strong>
-            <div class="meta">${colProb}% tip</div>
-          </div>
+        <div class="tip">
+          <div class="label">Prediction</div>
+          <strong class="${bs}">${bs}</strong>
+          <div class="meta">${bsProb}% tip share</div>
         </div>
-          <div class="meta">
-            Tip number: <b>${num ?? "—"}</b><br/>
-            Confidence: <b>${d.confidence_level || "—"}</b> (${conf}%) · strategy ${d.strategy || "—"}<br/>
-            Real settled accuracy:
-            BS <b>${d.live_accuracy?.big_small_pct != null ? Number(d.live_accuracy.big_small_pct).toFixed(1) + "%" : "—"}</b>
-            · Color <b>${d.live_accuracy?.color_pct != null ? Number(d.live_accuracy.color_pct).toFixed(1) + "%" : "—"}</b>
-            <span>(n=${d.live_accuracy?.sample ?? 0})</span><br/>
-            Updated: ${d.generated_at || "—"}
-          </div>
-        `;
+        <div class="meta">
+          Confidence: <b>${d.confidence_level || "—"}</b> (${conf}%) · ${d.strategy || "majority_bs"}<br/>
+          Real settled BS accuracy:
+          <b>${d.live_accuracy?.big_small_pct != null ? Number(d.live_accuracy.big_small_pct).toFixed(1) + "%" : "—"}</b>
+          <span>(n=${d.live_accuracy?.sample ?? 0})</span><br/>
+          Updated: ${d.generated_at || "—"}
+        </div>
+      `;
       if (changed) setTimeout(() => box.classList.remove("flash"), 600);
 
       const dot = document.getElementById("liveDot");
@@ -178,7 +159,7 @@
         : (d.generated_at ? Math.max(0, Math.floor((Date.now() - Date.parse(d.generated_at)) / 1000)) : null);
       if (age != null && age < 90) {
         dot.className = "dot";
-        liveText.textContent = `LIVE auto tip · refresh 1s · server ${age}s ago`;
+        liveText.textContent = `LIVE Big/Small · refresh 1s · server ${age}s ago`;
       } else {
         dot.className = "dot dead";
         liveText.textContent = age == null

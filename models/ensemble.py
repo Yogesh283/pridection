@@ -544,16 +544,12 @@ def build_prediction_export(
         "next_serial": period_serial(target),
         "current_period": current,
         "current_serial": period_serial(current) if current else None,
-        "focus": ensemble_result.get("focus", PREDICTION_FOCUS),
+        "focus": "big_small",
         "prediction": {
             "big_small": ensemble_result["top_big_small"],
-            "number": ensemble_result["top_number"],
-            "color": ensemble_result["top_color"],
         },
         "probabilities": {
             "big_small": ensemble_result["big_small_probability"],
-            "number": ensemble_result["number_probability"],
-            "color": ensemble_result["color_probability"],
         },
         "confidence": ensemble_result["confidence_score"],
         "confidence_level": ensemble_result["confidence_level"],
@@ -561,11 +557,9 @@ def build_prediction_export(
         "strategy": ensemble_result.get("bs_source"),
         "live_accuracy": {
             "big_small_pct": acc.get("big_small_accuracy"),
-            "color_pct": acc.get("color_accuracy"),
             "sample": acc.get("total_predictions"),
-            "note": "Settled tips only — long-run ~50% is normal for this game.",
+            "note": "Big/Small only. Long-run ~50% is normal.",
         },
         "generated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
-        "disclaimer": ensemble_result.get("disclaimer")
-        or "Estimate only. This is not a guaranteed next result.",
+        "disclaimer": "Big/Small estimate only — not number or color.",
     }
