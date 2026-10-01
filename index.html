@@ -147,9 +147,9 @@
           Analysis (last <b>10</b> bets):
           ${(d.analysis?.last10 || []).join(",") || "—"}
           · BIG/SMALL=${d.analysis?.window_big ?? "—"}/${d.analysis?.window_small ?? "—"}
-          · margin=${d.analysis?.window_margin ?? "—"} need=${d.analysis?.min_margin ?? 2}
           · streak=${d.analysis?.streak ?? "—"} ${d.analysis?.last_bs || ""}
-          · recent maj ${d.analysis?.recent_majority_pct ?? "—"}%<br/>
+          · follow ${d.analysis?.recent_follow_pct ?? "—"}%
+          · flip ${d.analysis?.recent_flip_pct ?? "—"}%<br/>
           Confidence: <b>${d.confidence_level || "—"}</b> (${conf}%) · ${d.strategy || "—"}<br/>
           Real settled BS accuracy (strong tips only):
           <b>${d.live_accuracy?.big_small_pct != null ? Number(d.live_accuracy.big_small_pct).toFixed(1) + "%" : "—"}</b>

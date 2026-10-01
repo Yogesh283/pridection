@@ -9,8 +9,9 @@ from analysis.statistics import big_small_label
 
 # Tip from last 10 settled rounds only (~5 minutes on WinGo 30s).
 ANALYSIS_ROUNDS = 10
-# On 10 rounds, need at least 2-vote edge (e.g. 6–4). Tie 5–5 -> WAIT.
-MIN_MARGIN = 2
+# Need clear recent edge before TIP (else WAIT).
+MIN_RULE_PCT = 60.0
+MIN_RULE_EDGE = 20.0
 
 
 def analyze_big_small(
@@ -42,23 +43,16 @@ def analyze_big_small(
     small_n = int(counts.get("SMALL", 0))
     margin = abs(big_n - small_n)
 
-    # Light recent hit-rates on last 10 tips of simple rules
-    follow_hits = flip_hits = maj_hits = tested = 0
-    start = max(3, len(labels) - window)
+    # follow = same as last, flip = opposite — measure which hit on last 10.
+    follow_hits = flip_hits = tested = 0
+    start = max(2, len(labels) - window)
     for i in range(start, len(labels)):
         past = labels[:i]
         actual = labels[i]
         follow = past[-1]
         flip = "BIG" if follow == "SMALL" else "SMALL"
-        w = past[-window:] if len(past) >= window else past
-        cw = Counter(w)
-        if cw.get("BIG", 0) == cw.get("SMALL", 0):
-            maj = flip
-        else:
-            maj = "BIG" if cw.get("BIG", 0) > cw.get("SMALL", 0) else "SMALL"
         follow_hits += int(follow == actual)
         flip_hits += int(flip == actual)
-        maj_hits += int(maj == actual)
         tested += 1
 
     def rate(h: int) -> float:
@@ -75,11 +69,11 @@ def analyze_big_small(
         "window_big": big_n,
         "window_small": small_n,
         "window_margin": margin,
-        "min_margin": MIN_MARGIN,
+        "min_rule_pct": MIN_RULE_PCT,
+        "min_rule_edge": MIN_RULE_EDGE,
         "recent_test_n": tested,
         "recent_follow_pct": rate(follow_hits),
         "recent_flip_pct": rate(flip_hits),
-        "recent_majority_pct": rate(maj_hits),
         "last10": win,
         "last5": labels[-5:],
     }
@@ -87,7 +81,8 @@ def analyze_big_small(
 
 def tip_from_analysis(analysis: dict[str, Any]) -> dict[str, Any]:
     """
-    Step 2 — prediction ONLY from last-10 analysis.
+    Step 2 — tip only when last-10 clearly favors follow OR flip.
+    Old anti-streak forced flip while live follow was ~80% — felt all wrong.
     """
     if not analysis.get("ok"):
         return {
@@ -100,57 +95,49 @@ def tip_from_analysis(analysis: dict[str, Any]) -> dict[str, Any]:
         }
 
     last = str(analysis["last_bs"])
-    streak_n = int(analysis["streak"])
-    big_n = int(analysis["window_big"])
-    small_n = int(analysis["window_small"])
-    margin = int(analysis["window_margin"])
-    total_w = max(1, int(analysis["window"]))
-    need = int(analysis.get("min_margin") or MIN_MARGIN)
     last10 = analysis.get("last10") or []
+    follow_pct = float(analysis.get("recent_follow_pct") or 50.0)
+    flip_pct = float(analysis.get("recent_flip_pct") or 50.0)
+    need_pct = float(analysis.get("min_rule_pct") or MIN_RULE_PCT)
+    need_edge = float(analysis.get("min_rule_edge") or MIN_RULE_EDGE)
 
-    # Rule A: streak 3+ -> flip
-    if streak_n >= 3:
-        tip = "SMALL" if last == "BIG" else "BIG"
-        other = last
-        return {
-            "big_small": tip,
-            "skip": False,
-            "action": "TIP",
-            "source": "last10_anti_streak3",
-            "probs": {tip: 0.58, other: 0.42},
-            "reason": f"last10 streak {streak_n}x {last} -> tip {tip}",
-        }
+    follow_tip = last
+    flip_tip = "BIG" if last == "SMALL" else "SMALL"
 
-    # Rule B: last 10 majority with clear margin
-    if big_n == small_n or margin < need:
+    if follow_pct >= flip_pct:
+        best_name, best_tip, best_pct = "follow", follow_tip, follow_pct
+        other_pct = flip_pct
+    else:
+        best_name, best_tip, best_pct = "flip", flip_tip, flip_pct
+        other_pct = follow_pct
+    edge = best_pct - other_pct
+
+    if best_pct < need_pct or edge < need_edge:
         return {
             "big_small": None,
             "skip": True,
             "action": "WAIT",
-            "source": "last10_weak",
+            "source": "last10_no_edge",
             "probs": {"BIG": 0.5, "SMALL": 0.5},
             "reason": (
-                f"last10 {last10}: BIG={big_n} SMALL={small_n} "
-                f"margin={margin} need>={need} -> WAIT"
+                f"last10 {last10}: follow={follow_pct}% flip={flip_pct}% "
+                f"best={best_name}@{best_pct}% edge={edge:.1f} "
+                f"need>={need_pct}%/+{need_edge} -> WAIT"
             ),
         }
 
-    tip = "BIG" if big_n > small_n else "SMALL"
-    probs = {
-        "BIG": (big_n + 1) / (total_w + 2),
-        "SMALL": (small_n + 1) / (total_w + 2),
-    }
-    s = probs["BIG"] + probs["SMALL"]
-    probs = {k: v / s for k, v in probs.items()}
+    other = "BIG" if best_tip == "SMALL" else "SMALL"
+    conf = min(0.70, 0.50 + (best_pct - 50.0) / 100.0)
     return {
-        "big_small": tip,
+        "big_small": best_tip,
         "skip": False,
         "action": "TIP",
-        "source": "last10_majority",
-        "probs": probs,
+        "source": f"last10_{best_name}",
+        "probs": {best_tip: conf, other: 1.0 - conf},
         "reason": (
-            f"last10 {last10}: BIG={big_n} SMALL={small_n} "
-            f"margin={margin} -> tip {tip}"
+            f"last10 {last10}: {best_name}@{best_pct}% > "
+            f"{'flip' if best_name == 'follow' else 'follow'}@{other_pct}% "
+            f"-> tip {best_tip}"
         ),
     }
 
