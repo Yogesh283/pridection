@@ -230,7 +230,11 @@ class EnsemblePredictor:
             "color_probability": None,
             "big_small_probability": output.get("confidence"),
             "confidence_score": float(output.get("confidence") or 0.0),
-            "confidence_level": "HIGH" if available else "UNAVAILABLE",
+            "confidence_level": (
+                output.get("confidence_level")
+                if available
+                else "UNAVAILABLE"
+            ),
             "model_agreement": None,
             "adaptive_weights": dict(
                 (self.production.artifact or {}).get("weights", {})

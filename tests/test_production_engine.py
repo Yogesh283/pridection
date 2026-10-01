@@ -70,6 +70,7 @@ def test_model_survives_restart_and_retrains(tmp_path):
             "trained_until_period": rounds[199]["period"],
             "retrain_every": 25,
             "confidence_threshold": 0.50,
+            "decision_threshold": 0.50,
         },
         path,
     )
@@ -84,3 +85,68 @@ def test_model_survives_restart_and_retrains(tmp_path):
     assert restarted.artifact is not None
     assert output["model_name"] == "gradient_boosting"
     assert output["status"] == "PREDICTION_AVAILABLE"
+
+
+def test_probability_side_maps_to_prediction(tmp_path, monkeypatch):
+    """Regression: tip must follow P(BIG) vs decision_threshold (SMALL-bias bug)."""
+    rounds = _rounds(220)
+    x, y, _ = build_supervised_dataset(rounds[:200], min_history=50)
+    model = candidate_factories()["gradient_boosting"]()
+    model.fit(x, y)
+    path = tmp_path / "production.joblib"
+    joblib.dump(
+        {
+            "models": {"gradient_boosting": model},
+            "weights": {"gradient_boosting": 1.0},
+            "selected_model": "gradient_boosting",
+            "model_name": "gradient_boosting",
+            "model_version": "test_map",
+            "feature_names": FEATURE_NAMES,
+            "feature_warmup": 50,
+            "trained_rows": len(y),
+            "trained_rounds": 200,
+            "trained_until_period": rounds[199]["period"],
+            "retrain_every": 100000,
+            "confidence_threshold": 0.50,
+            "decision_threshold": 0.50,
+            "high_confidence_enabled": False,
+        },
+        path,
+    )
+    engine = ProductionBigSmallEngine(path)
+
+    monkeypatch.setattr(engine, "_probability_big", lambda vector: 0.62)
+    out = engine.predict(rounds)
+    assert out["ok"] is True
+    assert out["prediction"] == "BIG"
+    assert out["confidence_level"] == "MEDIUM"
+
+    monkeypatch.setattr(engine, "_probability_big", lambda vector: 0.38)
+    out = engine.predict(rounds)
+    assert out["prediction"] == "SMALL"
+    assert out["confidence_level"] == "MEDIUM"
+
+    # Exact threshold => BIG (documented)
+    monkeypatch.setattr(engine, "_probability_big", lambda vector: 0.50)
+    out = engine.predict(rounds)
+    assert out["prediction"] == "BIG"
+    assert out["confidence_level"] == "LOW"
+
+    # ~52% must never be HIGH
+    monkeypatch.setattr(engine, "_probability_big", lambda vector: 0.52)
+    out = engine.predict(rounds)
+    assert out["confidence_level"] == "LOW"
+
+
+def test_classes_ordering_handled_for_probability_big():
+    from models.model_candidates import probability_big
+
+    rounds = _rounds(120)
+    x, y, _ = build_supervised_dataset(rounds, min_history=50)
+    model = candidate_factories()["gradient_boosting"]()
+    model.fit(x, y)
+    assert 0 in list(model.classes_) and 1 in list(model.classes_)
+    row = x[-1:].copy()
+    p = probability_big(model, row)
+    proba = model.predict_proba(row)[0]
+    assert abs(p - float(proba[list(model.classes_).index(1)])) < 1e-9

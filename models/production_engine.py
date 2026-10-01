@@ -134,6 +134,17 @@ class ProductionBigSmallEngine:
                         "trained_until_period": str(rounds[-1]["period"]),
                         "trained_at": _utc_now(),
                         "model_version": f"{selected}_{now:%Y%m%d}_{len(rounds)}",
+                        # Preserve bias-fix decision threshold / bands across retrain.
+                        "decision_threshold": float(
+                            self.artifact.get("decision_threshold") or 0.5
+                        ),
+                        "confidence_bands": self.artifact.get("confidence_bands")
+                        or {
+                            "LOW": [0.50, 0.55],
+                            "MEDIUM": [0.55, 0.65],
+                            "HIGH": [0.65, 0.75],
+                            "VERY_HIGH": [0.75, 1.01],
+                        },
                     }
                 )
                 self.artifact_path.parent.mkdir(parents=True, exist_ok=True)
@@ -167,6 +178,7 @@ class ProductionBigSmallEngine:
             p_small = 1.0 - p_big
             confidence = max(p_big, p_small)
             assert self.artifact is not None
+            decision_threshold = float(self.artifact.get("decision_threshold") or 0.5)
             configured = os.getenv("PRODUCTION_CONFIDENCE_THRESHOLD", "").strip()
             threshold = (
                 float(configured)
@@ -190,10 +202,21 @@ class ProductionBigSmallEngine:
                         "probability_small": round(p_small, 6),
                         "confidence": round(confidence, 6),
                         "confidence_threshold": threshold,
+                        "decision_threshold": decision_threshold,
                     }
                 )
                 return unavailable
-            prediction = "BIG" if p_big >= 0.5 else "SMALL"
+            # Documented: p_big == decision_threshold => BIG
+            prediction = "BIG" if p_big >= decision_threshold else "SMALL"
+            # Explicit confidence bands (never label ~51% as HIGH).
+            if confidence < 0.55:
+                confidence_level = "LOW"
+            elif confidence < 0.65:
+                confidence_level = "MEDIUM"
+            elif confidence < 0.75:
+                confidence_level = "HIGH"
+            else:
+                confidence_level = "VERY_HIGH"
             return {
                 "ok": True,
                 "status": STATUS_AVAILABLE,
@@ -203,7 +226,9 @@ class ProductionBigSmallEngine:
                 "probability_big": round(p_big, 6),
                 "probability_small": round(p_small, 6),
                 "confidence": round(confidence, 6),
+                "confidence_level": confidence_level,
                 "confidence_threshold": threshold,
+                "decision_threshold": decision_threshold,
                 "high_confidence_mode": high_confidence_mode,
                 "model_name": self.artifact["model_name"],
                 "model_version": self.artifact["model_version"],
