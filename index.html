@@ -144,11 +144,11 @@
         </div>
         <div class="meta">
           Reason: <b>${d.tip_reason || "—"}</b><br/>
-          Analysis (~${d.analysis?.analysis_minutes ?? 30}m / ${d.analysis?.analysis_rounds ?? 60}r):
-          last5=${(d.analysis?.last5 || []).join(",") || "—"}
+          Analysis (last <b>10</b> bets):
+          ${(d.analysis?.last10 || []).join(",") || "—"}
+          · BIG/SMALL=${d.analysis?.window_big ?? "—"}/${d.analysis?.window_small ?? "—"}
+          · margin=${d.analysis?.window_margin ?? "—"} need=${d.analysis?.min_margin ?? 2}
           · streak=${d.analysis?.streak ?? "—"} ${d.analysis?.last_bs || ""}
-          · 30m BIG/SMALL=${d.analysis?.window_big ?? "—"}/${d.analysis?.window_small ?? "—"}
-          · margin=${d.analysis?.window_margin ?? "—"} need=${d.analysis?.min_margin ?? 6}
           · recent maj ${d.analysis?.recent_majority_pct ?? "—"}%<br/>
           Confidence: <b>${d.confidence_level || "—"}</b> (${conf}%) · ${d.strategy || "—"}<br/>
           Real settled BS accuracy (strong tips only):
