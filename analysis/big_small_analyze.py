@@ -7,10 +7,17 @@ from typing import Any
 
 from analysis.statistics import big_small_label
 
+# WinGo 30s: 30 minutes ≈ 60 settled rounds.
+ANALYSIS_ROUNDS_30M = 60
+# Need a clearer majority on a long window (not just 1–2 vote edge).
+MIN_MARGIN_30M = 6
 
-def analyze_big_small(history: list[dict[str, Any]], window: int = 8) -> dict[str, Any]:
+
+def analyze_big_small(
+    history: list[dict[str, Any]], window: int = ANALYSIS_ROUNDS_30M
+) -> dict[str, Any]:
     """
-    Step 1 — analyze settled history only (no future leakage).
+    Step 1 — analyze last ~30 minutes of settled history (default 60 rounds).
     Step 2 — caller uses this dict to choose TIP / WAIT.
     """
     if not history:
@@ -37,15 +44,15 @@ def analyze_big_small(history: list[dict[str, Any]], window: int = 8) -> dict[st
     last20 = labels[-20:] if len(labels) >= 20 else labels
     c20 = Counter(last20)
 
-    # Recent rule hit-rates on last 40 (walk-forward light)
+    # Recent rule hit-rates on the same ~30m window
     follow_hits = flip_hits = maj_hits = tested = 0
-    start = max(8, len(labels) - 40)
+    start = max(8, len(labels) - window)
     for i in range(start, len(labels)):
         past = labels[:i]
         actual = labels[i]
         follow = past[-1]
         flip = "BIG" if follow == "SMALL" else "SMALL"
-        w = past[-window:]
+        w = past[-window:] if len(past) >= window else past
         cw = Counter(w)
         if cw.get("BIG", 0) == cw.get("SMALL", 0):
             maj = flip
@@ -62,12 +69,15 @@ def analyze_big_small(history: list[dict[str, Any]], window: int = 8) -> dict[st
     return {
         "ok": True,
         "history_count": len(labels),
+        "analysis_minutes": round(len(win) * 0.5, 1),  # 30s rounds
+        "analysis_rounds": len(win),
         "last_bs": last,
         "streak": streak_n,
         "window": len(win),
         "window_big": big_n,
         "window_small": small_n,
         "window_margin": margin,
+        "min_margin": MIN_MARGIN_30M,
         "last20_big": int(c20.get("BIG", 0)),
         "last20_small": int(c20.get("SMALL", 0)),
         "recent_test_n": tested,
@@ -98,6 +108,8 @@ def tip_from_analysis(analysis: dict[str, Any]) -> dict[str, Any]:
     small_n = int(analysis["window_small"])
     margin = int(analysis["window_margin"])
     total_w = max(1, int(analysis["window"]))
+    need = int(analysis.get("min_margin") or MIN_MARGIN_30M)
+    minutes = analysis.get("analysis_minutes") or round(total_w * 0.5, 1)
 
     # Rule A: analyze streak -> if 3+ same, tip opposite
     if streak_n >= 3:
@@ -109,18 +121,21 @@ def tip_from_analysis(analysis: dict[str, Any]) -> dict[str, Any]:
             "action": "TIP",
             "source": "analysis_anti_streak3",
             "probs": {tip: 0.58, other: 0.42},
-            "reason": f"last {streak_n}x {last} -> tip {tip}",
+            "reason": f"last {streak_n}x {last} -> tip {tip} (from ~{minutes}m data)",
         }
 
-    # Rule B: analyze majority window -> need clear margin
-    if big_n == small_n or margin < 2:
+    # Rule B: ~30m majority window needs clear margin
+    if big_n == small_n or margin < need:
         return {
             "big_small": None,
             "skip": True,
             "action": "WAIT",
             "source": "analysis_weak_signal",
             "probs": {"BIG": 0.5, "SMALL": 0.5},
-            "reason": f"window BIG={big_n} SMALL={small_n} (no clear edge)",
+            "reason": (
+                f"~{minutes}m ({total_w}r): BIG={big_n} SMALL={small_n} "
+                f"margin={margin} need>={need} -> WAIT"
+            ),
         }
 
     tip = "BIG" if big_n > small_n else "SMALL"
@@ -134,13 +149,16 @@ def tip_from_analysis(analysis: dict[str, Any]) -> dict[str, Any]:
         "big_small": tip,
         "skip": False,
         "action": "TIP",
-        "source": "analysis_strong_majority",
+        "source": "analysis_30m_majority",
         "probs": probs,
-        "reason": f"last{total_w}: BIG={big_n} SMALL={small_n} -> tip {tip}",
+        "reason": (
+            f"~{minutes}m ({total_w}r): BIG={big_n} SMALL={small_n} "
+            f"margin={margin} -> tip {tip}"
+        ),
     }
 
 
 def analyze_then_predict(history: list[dict[str, Any]]) -> dict[str, Any]:
-    analysis = analyze_big_small(history)
+    analysis = analyze_big_small(history, window=ANALYSIS_ROUNDS_30M)
     tip = tip_from_analysis(analysis)
     return {"analysis": analysis, "tip": tip}
