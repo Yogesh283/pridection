@@ -221,50 +221,20 @@ class EnsemblePredictor:
     def _pick_big_small(
         self, history: list[dict[str, Any]]
     ) -> tuple[str, dict[str, float], str, bool]:
-        """
-        Selective Big/Small (tuned on local walk-forward ~952 rounds):
+        """Analyze past BS data first, then tip (or WAIT)."""
+        from analysis.big_small_analyze import analyze_then_predict
 
-        1) If last BS streak >= 3 -> flip (anti-streak)
-        2) Else if majority(window=8) margin >= 2 votes -> take majority
-        3) Else skip tip (weak/tie) so published accuracy can rise a bit
+        bundle = analyze_then_predict(history)
+        tip = bundle["tip"]
+        analysis = bundle["analysis"]
+        # stash for export
+        self._last_bs_analysis = {"analysis": analysis, "tip": tip}
 
-        Returns: top, probs, source, skip
-        """
-        labels = [big_small_label(int(r["number"])) for r in history]
-        last = labels[-1]
-        streak_n = 0
-        for x in reversed(labels):
-            if x == last:
-                streak_n += 1
-            else:
-                break
-
-        if streak_n >= 3:
-            top = "SMALL" if last == "BIG" else "BIG"
-            other = last
-            return top, _normalize({top: 0.58, other: 0.42}), "anti_streak3", False
-
-        window = labels[-8:] if len(labels) >= 8 else labels
-        from collections import Counter
-
-        counts = Counter(window)
-        big_n = int(counts.get("BIG", 0))
-        small_n = int(counts.get("SMALL", 0))
-        if big_n == small_n:
-            # weak tie -> skip
-            tip = "SMALL" if last == "BIG" else "BIG"
-            return tip, {"BIG": 0.5, "SMALL": 0.5}, "tie_skip", True
-        top = "BIG" if big_n > small_n else "SMALL"
-        margin = abs(big_n - small_n)
-        probs = _normalize(
-            {
-                "BIG": (big_n + 1) / (len(window) + 2),
-                "SMALL": (small_n + 1) / (len(window) + 2),
-            }
-        )
-        if margin < 2:
-            return top, probs, "weak_majority_skip", True
-        return top, probs, "strong_majority", False
+        probs = tip.get("probs") or {"BIG": 0.5, "SMALL": 0.5}
+        skip = bool(tip.get("skip"))
+        top = str(tip.get("big_small") or ("SMALL" if analysis.get("last_bs") == "BIG" else "BIG"))
+        source = str(tip.get("source") or "analysis")
+        return top, _normalize({str(k): float(v) for k, v in probs.items()}), source, skip
 
     def _pick_color(self, history: list[dict[str, Any]]) -> tuple[str, dict[str, float], str]:
         """Color kept for internal metrics only (UI is Big/Small-only)."""
@@ -521,6 +491,7 @@ class EnsemblePredictor:
             "top_big_small": top_big_small,
             "bs_source": bs_source,
             "skip_tip": bool(skip_tip),
+            "bs_analysis": getattr(self, "_last_bs_analysis", None),
             "number_probability": next(
                 p["probability"]
                 for p in number_predictions
@@ -550,8 +521,7 @@ class EnsemblePredictor:
             "sample_size": len(history),
             "models_used": list(outputs.keys()),
             "disclaimer": (
-                "Probability is not certainty. This is a statistical estimate "
-                "based on historical patterns only."
+                "Past Big/Small data is analyzed first; tip follows that analysis."
             ),
         }
 
@@ -580,6 +550,9 @@ def build_prediction_export(
     acc = live_accuracy or {}
     skip = bool(ensemble_result.get("skip_tip"))
     tip_bs = None if skip else ensemble_result["top_big_small"]
+    bs_analysis = ensemble_result.get("bs_analysis") or {}
+    analysis_block = bs_analysis.get("analysis") if isinstance(bs_analysis, dict) else None
+    tip_meta = bs_analysis.get("tip") if isinstance(bs_analysis, dict) else None
     return {
         "period": target,
         "next_period": target,
@@ -589,6 +562,10 @@ def build_prediction_export(
         "focus": "big_small",
         "skip": skip,
         "action": "WAIT" if skip else "TIP",
+        "analysis": analysis_block,
+        "tip_reason": (tip_meta or {}).get("reason")
+        if isinstance(tip_meta, dict)
+        else None,
         "prediction": {
             "big_small": tip_bs,
         },
@@ -602,8 +579,8 @@ def build_prediction_export(
         "live_accuracy": {
             "big_small_pct": acc.get("big_small_accuracy"),
             "sample": acc.get("total_predictions"),
-            "note": "Only strong tips counted. Weak/tie rounds show WAIT.",
+            "note": "Analyze past BS first, then TIP/WAIT.",
         },
         "generated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
-        "disclaimer": "Big/Small only. WAIT = weak signal skipped for better tip quality.",
+        "disclaimer": "Prediction comes after past Big/Small analysis only.",
     }
