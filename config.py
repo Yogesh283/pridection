@@ -83,3 +83,14 @@ SCHEMA_REQUIRED_HINTS = ("period", "number")
 # Primary market focus for live predictions / confidence.
 # Options: "big_small", "color", "number"
 PREDICTION_FOCUS = os.getenv("PREDICTION_FOCUS", "big_small").strip().lower()
+
+# Live Big/Small decision authority — intentional production replacement.
+# majority_w8 remains diagnostic-only in research tools; never silent live fallback.
+PREDICTION_MODEL = "gradient_boosting"
+
+# Gradient Boosting live predictor settings
+GB_MIN_HISTORY = int(os.getenv("GB_MIN_HISTORY", "200"))
+GB_RETRAIN_EVERY = int(os.getenv("GB_RETRAIN_EVERY", "25"))
+GB_N_ESTIMATORS = int(os.getenv("GB_N_ESTIMATORS", "100"))
+GB_LEARNING_RATE = float(os.getenv("GB_LEARNING_RATE", "0.05"))
+GB_MAX_DEPTH = int(os.getenv("GB_MAX_DEPTH", "3"))

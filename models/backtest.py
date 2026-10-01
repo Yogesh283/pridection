@@ -80,10 +80,20 @@ def backtest_history(
             result = ensemble.predict(history, train_ml=False, focus="big_small")
             if not result:
                 continue
+            if result.get("skip_tip"):
+                details.append(
+                    {
+                        "period": actual.get("period"),
+                        "action": "WAIT",
+                        "skip": True,
+                        "strategy": result.get("decision_strategy") or result.get("bs_source"),
+                    }
+                )
+                continue
             pred_number = int(result["top_number"])
             pred_color = str(result["top_color"])
             pred_bs = str(result.get("top_big_small") or big_small_label(pred_number))
-            model_name = "ensemble"
+            model_name = str(result.get("decision_strategy") or "majority_w8")
         else:
             result = baselines["frequency"].predict(history)
             pred_number = max(result["numbers"], key=result["numbers"].get)
@@ -128,12 +138,16 @@ def backtest_history(
                 "color_correct": color_correct,
                 "big_small_correct": bs_correct,
                 "model_name": model_name,
+                "skip": False,
             }
         )
         confusion[str(pred_number)][str(actual_number)] += 1
         model_hits[model_name]["total"] += 1
         model_hits[model_name]["n_correct"] += number_correct
         model_hits[model_name]["c_correct"] += color_correct
+        model_hits[model_name]["bs_correct"] = (
+            model_hits[model_name].get("bs_correct", 0) + bs_correct
+        )
 
         # Track individual baseline agreement for reporting.
         for bname, bmodel in baselines.items():
@@ -146,13 +160,15 @@ def backtest_history(
                 bc and actual_color and bc.upper() == str(actual_color).upper()
             )
 
-    total = len(details)
-    correct_numbers = sum(d["number_correct"] for d in details)
-    correct_colors = sum(d["color_correct"] for d in details)
-    correct_bs = sum(d["big_small_correct"] for d in details)
+    scored = [d for d in details if not d.get("skip")]
+    wait_n = sum(1 for d in details if d.get("skip"))
+    total = len(scored)
+    correct_numbers = sum(d["number_correct"] for d in scored)
+    correct_colors = sum(d["color_correct"] for d in scored)
+    correct_bs = sum(d["big_small_correct"] for d in scored)
 
     def window_stats(n: int) -> dict[str, float]:
-        subset = details[-n:]
+        subset = [d for d in scored if True][-n:]
         t = len(subset) or 1
         return {
             "sample_size": float(len(subset)),
@@ -183,6 +199,8 @@ def backtest_history(
         "correct_big_small": correct_bs,
         "wrong_big_small": total - correct_bs,
         "big_small_accuracy": 100.0 * correct_bs / total if total else 0.0,
+        "wait_excluded": wait_n,
+        "coverage_pct": 100.0 * total / (total + wait_n) if (total + wait_n) else 0.0,
         "last_20": window_stats(20),
         "last_50": window_stats(50),
         "last_100": window_stats(100),
@@ -199,7 +217,10 @@ def backtest_history(
         "note": (
             "Insufficient sample size."
             if total < 20
-            else "Backtest uses only past data for each prediction."
+            else (
+                "Backtest uses only past data; WAIT/ties excluded from accuracy "
+                f"(wait={wait_n})."
+            )
         ),
     }
     return report

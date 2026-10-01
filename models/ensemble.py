@@ -15,6 +15,7 @@ from config import (
     MIN_SAMPLE_FOR_ACCURACY_CLAIM,
     PREDICTION_FOCUS,
     PREDICTION_JSON_PATH,
+    PREDICTION_MODEL,
 )
 from models.predictor import (
     FrequencyModel,
@@ -175,6 +176,72 @@ class EnsemblePredictor:
         self._bs_tie_margin = 0.08
         self._regime_window = 20
         self._cold_threshold = 0.48
+        # Legacy predictors above are retained for diagnostics only.
+        from models.gradient_boosting import get_live_gb
+        from models.production_engine import get_production_engine
+
+        self.gb = get_live_gb()
+        self.production = get_production_engine()
+        self._last_bs_analysis: dict[str, Any] | None = None
+
+    def _predict_production_big_small(
+        self, history: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        output = self.production.predict(history)
+        available = bool(output.get("ok"))
+        p_big = output.get("probability_big")
+        p_small = output.get("probability_small")
+        probabilities = (
+            {"BIG": float(p_big), "SMALL": float(p_small)}
+            if p_big is not None and p_small is not None
+            else {"BIG": 0.5, "SMALL": 0.5}
+        )
+        strategy = output.get("decision_strategy") or output.get("model_name")
+        return {
+            "focus": "big_small",
+            "status": output.get("status", "PREDICTION_UNAVAILABLE"),
+            "number_predictions": [],
+            "color_predictions": [],
+            "big_small_predictions": [
+                {"big_small": side, "probability": round(probability, 6)}
+                for side, probability in sorted(
+                    probabilities.items(), key=lambda item: item[1], reverse=True
+                )
+            ],
+            "top_number": None,
+            "top_color": None,
+            "top_big_small": output.get("prediction") if available else None,
+            "bs_source": strategy,
+            "decision_strategy": strategy,
+            "candidate_models": list((self.production.artifact or {}).get("models", {})),
+            "ml_is_tip_authority": available,
+            "skip_tip": not available,
+            "prediction_unavailable": not available,
+            "unavailable_reason": output.get("unavailable_reason"),
+            "bs_analysis": None,
+            "model_name": output.get("model_name"),
+            "model_version": output.get("model_version"),
+            "trained_on_rows": output.get("trained_rows"),
+            "trained_until_period": output.get("trained_until_period"),
+            "probability_big": p_big,
+            "probability_small": p_small,
+            "number_probability": None,
+            "color_probability": None,
+            "big_small_probability": output.get("confidence"),
+            "confidence_score": float(output.get("confidence") or 0.0),
+            "confidence_level": "HIGH" if available else "UNAVAILABLE",
+            "model_agreement": None,
+            "adaptive_weights": dict(
+                (self.production.artifact or {}).get("weights", {})
+            ),
+            "model_outputs": {},
+            "sample_size": len(history),
+            "models_used": list((self.production.artifact or {}).get("models", {})),
+            "disclaimer": (
+                "Probability is a model output, not a guaranteed accuracy rate. "
+                "No majority or frequency fallback is used."
+            ),
+        }
 
     def _maj8_hit_rate(self, history: list[dict[str, Any]], window: int) -> float:
         if len(history) < window + 2:
@@ -220,29 +287,151 @@ class EnsemblePredictor:
 
     def _pick_big_small(
         self, history: list[dict[str, Any]]
-    ) -> tuple[str, dict[str, float], str, bool, int | None]:
-        """Analyze past BS + number data first, then tip (or WAIT)."""
+    ) -> tuple[str | None, dict[str, float], str, bool, int | None]:
+        """
+        Live Big/Small tip authority.
+
+        Production: gradient_boosting (PREDICTION_MODEL).
+        majority_w8 is diagnostic only — never silent fallback.
+        """
         from analysis.big_small_analyze import analyze_then_predict
 
+        # Keep last-10 analysis for UI/diagnostics (not for tip selection).
         bundle = analyze_then_predict(history)
-        tip = bundle["tip"]
-        analysis = bundle["analysis"]
-        # stash for export
-        self._last_bs_analysis = {"analysis": analysis, "tip": tip}
+        analysis = bundle.get("analysis") or {}
 
-        probs = tip.get("probs") or {"BIG": 0.5, "SMALL": 0.5}
-        skip = bool(tip.get("skip"))
-        top = str(tip.get("big_small") or ("SMALL" if analysis.get("last_bs") == "BIG" else "BIG"))
-        source = str(tip.get("source") or "analysis")
-        tip_num = tip.get("number")
-        tip_num_i = int(tip_num) if tip_num is not None else None
-        return (
-            top,
-            _normalize({str(k): float(v) for k, v in probs.items()}),
-            source,
-            skip,
-            tip_num_i,
-        )
+        maj_out = self.majority.predict(history)
+        maj_bs = {str(k): float(v) for k, v in maj_out["big_small"].items()}
+        top_num_any = int(max(maj_out["numbers"], key=maj_out["numbers"].get))
+        num_alts = [
+            {"number": int(n), "pct": round(100.0 * float(p), 1)}
+            for n, p in sorted(
+                maj_out["numbers"].items(), key=lambda x: x[1], reverse=True
+            )[:3]
+        ]
+
+        authority = (PREDICTION_MODEL or "gradient_boosting").strip().lower()
+        if authority == "gradient_boosting":
+            # Controlled retrain (every N new rounds), then predict.
+            self.gb.ensure_ready(history, force_retrain=False)
+            gb_out = self.gb.predict(history)
+            if not gb_out.get("ok"):
+                reason = gb_out.get("unavailable_reason") or "unknown"
+                tip_meta = {
+                    "big_small": None,
+                    "number": None,
+                    "numbers": num_alts,
+                    "number_pct": None,
+                    "skip": True,
+                    "action": "PREDICTION_UNAVAILABLE",
+                    "source": "PREDICTION_UNAVAILABLE",
+                    "probs": None,
+                    "reason": f"PREDICTION_UNAVAILABLE: {reason}",
+                    "gb": gb_out,
+                    "diagnostic_majority_w8": maj_bs,
+                }
+                self._last_bs_analysis = {"analysis": analysis, "tip": tip_meta}
+                return (
+                    None,
+                    {"BIG": 0.5, "SMALL": 0.5},
+                    "PREDICTION_UNAVAILABLE",
+                    True,
+                    None,
+                )
+
+            tip = str(gb_out["predicted_big_small"])
+            probs = {
+                "BIG": float(gb_out["probability_big"]),
+                "SMALL": float(gb_out["probability_small"]),
+            }
+            side = [
+                (n, p)
+                for n, p in maj_out["numbers"].items()
+                if big_small_label(int(n)) == tip
+            ]
+            tip_num = int(max(side, key=lambda x: x[1])[0]) if side else top_num_any
+            tip_meta = {
+                "big_small": tip,
+                "number": tip_num,
+                "numbers": num_alts,
+                "number_pct": round(
+                    100.0 * float(maj_out["numbers"].get(tip_num, 0.0)), 1
+                ),
+                "skip": False,
+                "action": "TIP",
+                "source": "gradient_boosting",
+                "probs": probs,
+                "reason": (
+                    f"gradient_boosting tip={tip} "
+                    f"P(BIG)={probs['BIG']:.3f} P(SMALL)={probs['SMALL']:.3f} "
+                    f"rows={gb_out.get('trained_on_rows')} "
+                    f"ver={gb_out.get('model_version')}"
+                ),
+                "gb": gb_out,
+                "diagnostic_majority_w8": maj_bs,
+            }
+            self._last_bs_analysis = {"analysis": analysis, "tip": tip_meta}
+            return tip, _normalize(probs), "gradient_boosting", False, tip_num
+
+        # Diagnostic-only path if PREDICTION_MODEL explicitly set to majority_w8.
+        win = history[-self.majority.bs_window :]
+        bs_counts = {
+            "BIG": sum(
+                1 for r in win if big_small_label(int(r["number"])) == "BIG"
+            ),
+            "SMALL": sum(
+                1 for r in win if big_small_label(int(r["number"])) == "SMALL"
+            ),
+        }
+        if bs_counts["BIG"] == bs_counts["SMALL"]:
+            tip_meta = {
+                "big_small": None,
+                "number": top_num_any,
+                "numbers": num_alts,
+                "number_pct": round(
+                    100.0 * float(maj_out["numbers"].get(top_num_any, 0.0)), 1
+                ),
+                "skip": True,
+                "action": "WAIT",
+                "source": "majority_tie",
+                "probs": {"BIG": 0.5, "SMALL": 0.5},
+                "reason": (
+                    f"majority w{self.majority.bs_window} "
+                    f"BIG={bs_counts['BIG']} SMALL={bs_counts['SMALL']} tie -> WAIT"
+                ),
+            }
+            self._last_bs_analysis = {"analysis": analysis, "tip": tip_meta}
+            return (
+                "BIG",
+                {"BIG": 0.5, "SMALL": 0.5},
+                "majority_tie",
+                True,
+                top_num_any,
+            )
+
+        tip = "BIG" if bs_counts["BIG"] > bs_counts["SMALL"] else "SMALL"
+        side = [
+            (n, p)
+            for n, p in maj_out["numbers"].items()
+            if big_small_label(int(n)) == tip
+        ]
+        tip_num = int(max(side, key=lambda x: x[1])[0]) if side else top_num_any
+        tip_meta = {
+            "big_small": tip,
+            "number": tip_num,
+            "numbers": num_alts,
+            "number_pct": round(100.0 * float(maj_out["numbers"].get(tip_num, 0.0)), 1),
+            "skip": False,
+            "action": "TIP",
+            "source": "majority_w8",
+            "probs": maj_bs,
+            "reason": (
+                f"majority w{self.majority.bs_window} "
+                f"BIG={bs_counts['BIG']} SMALL={bs_counts['SMALL']} -> tip {tip}"
+            ),
+        }
+        self._last_bs_analysis = {"analysis": analysis, "tip": tip_meta}
+        return tip, _normalize(maj_bs), "majority_w8", False, tip_num
 
     def _pick_color(self, history: list[dict[str, Any]]) -> tuple[str, dict[str, float], str]:
         """Color kept for internal metrics only (UI is Big/Small-only)."""
@@ -254,7 +443,8 @@ class EnsemblePredictor:
         return str(top), _normalize(maj_col), "majority_color"
 
     def maybe_train_ml(self, history: list[dict[str, Any]]) -> None:
-        if len(history) < 200:
+        # Supervised rows ~= len(history) - warm-up; allow training before 200 raw rows.
+        if len(history) < 120:
             return
         if self.ml.trained and abs(len(history) - self._last_train_size) < 50:
             return
@@ -328,6 +518,8 @@ class EnsemblePredictor:
             return None
 
         focus = (focus or PREDICTION_FOCUS or "big_small").lower()
+        if focus == "big_small":
+            return self._predict_production_big_small(history)
         if train_ml:
             self.maybe_train_ml(history)
 
@@ -436,12 +628,15 @@ class EnsemblePredictor:
             bs_source = "number_ensemble"
             conf_nums = {int(k): float(v) for k, v in number_probs.items()}
         else:
-            # Selective Big/Small (skip weak ties) + last-10 number tip.
+            # Production Big/Small authority (gradient_boosting by default).
             top_big_small, maj_bs, bs_source, skip_tip, tip_number = self._pick_big_small(
                 history
             )
             top_color, maj_col, color_source = self._pick_color(history)
+            decision_name = str(bs_source)
             bs_source = f"{bs_source}+{color_source}"
+            if top_big_small is None:
+                top_big_small = "BIG"  # placeholder; skip_tip prevents scoring
             big_small_predictions = [
                 {"big_small": str(k), "probability": round(float(p), 6)}
                 for k, p in sorted(maj_bs.items(), key=lambda x: x[1], reverse=True)
@@ -498,20 +693,63 @@ class EnsemblePredictor:
             if focus == "big_small"
             else historical_number_accuracy
         )
-        confidence = compute_confidence(
-            conf_nums,
-            {str(k): float(v) for k, v in maj_col.items()},
-            outputs,
-            sample_size=len(history),
-            historical_accuracy=hist_acc,
-            big_small_probs={str(k): float(v) for k, v in maj_bs.items()},
-            focus=focus,
-        )
+        # For GB authority, confidence tracks model probability (not ensemble vote).
+        tip_meta_full = (getattr(self, "_last_bs_analysis", None) or {}).get("tip") or {}
+        gb_payload = tip_meta_full.get("gb") if isinstance(tip_meta_full, dict) else None
+        if (
+            focus == "big_small"
+            and isinstance(gb_payload, dict)
+            and gb_payload.get("ok")
+            and gb_payload.get("confidence") is not None
+        ):
+            gb_conf = float(gb_payload["confidence"])
+            confidence = {
+                "confidence_score": round(gb_conf, 4),
+                "confidence_level": (
+                    "MEDIUM" if gb_conf >= 0.55 else "LOW"
+                ),
+                "model_agreement": "gb/1",
+                "agreement_count": 1,
+                "model_count": 1,
+                "top_number": top_number,
+                "top_color": top_color,
+                "top_big_small": top_big_small,
+                "focus": focus,
+            }
+        else:
+            confidence = compute_confidence(
+                conf_nums,
+                {str(k): float(v) for k, v in maj_col.items()},
+                outputs,
+                sample_size=len(history),
+                historical_accuracy=hist_acc,
+                big_small_probs={str(k): float(v) for k, v in maj_bs.items()},
+                focus=focus,
+            )
         if skip_tip:
             confidence["confidence_level"] = "LOW"
             confidence["confidence_score"] = min(
                 float(confidence["confidence_score"]), 0.45
             )
+
+        # Resolve decision_strategy for production naming.
+        if focus == "big_small":
+            if str(bs_source).startswith("PREDICTION_UNAVAILABLE") or skip_tip and (
+                "PREDICTION_UNAVAILABLE" in str(bs_source)
+            ):
+                decision_strategy = "PREDICTION_UNAVAILABLE"
+            elif "gradient_boosting" in str(bs_source):
+                decision_strategy = "gradient_boosting"
+            elif skip_tip and "tie" in str(bs_source):
+                decision_strategy = "majority_tie"
+            elif str(bs_source).startswith("majority"):
+                decision_strategy = "majority_w8"
+            else:
+                decision_strategy = str(bs_source).split("+")[0]
+        else:
+            decision_strategy = str(bs_source).split("+")[0] if bs_source else "ensemble"
+
+        gb_is_authority = decision_strategy == "gradient_boosting"
 
         return {
             "focus": focus,
@@ -520,17 +758,51 @@ class EnsemblePredictor:
             "big_small_predictions": big_small_predictions,
             "top_number": top_number,
             "top_color": top_color,
-            "top_big_small": top_big_small,
+            "top_big_small": None if skip_tip else top_big_small,
             "bs_source": bs_source,
+            "decision_strategy": decision_strategy,
+            "candidate_models": list(outputs.keys()),
+            "ml_is_tip_authority": gb_is_authority,
             "skip_tip": bool(skip_tip),
+            "prediction_unavailable": decision_strategy == "PREDICTION_UNAVAILABLE",
+            "unavailable_reason": (
+                tip_meta_full.get("reason")
+                if decision_strategy == "PREDICTION_UNAVAILABLE"
+                else None
+            ),
             "bs_analysis": getattr(self, "_last_bs_analysis", None),
+            "gb_status": self.gb.model_status() if hasattr(self, "gb") else None,
+            "model_name": decision_strategy,
+            "model_version": (
+                (gb_payload or {}).get("model_version")
+                if gb_is_authority
+                else None
+            ),
+            "trained_on_rows": (
+                (gb_payload or {}).get("trained_on_rows")
+                if gb_is_authority
+                else None
+            ),
+            "probability_big": (
+                float(maj_bs.get("BIG", 0.5)) if maj_bs else None
+            ),
+            "probability_small": (
+                float(maj_bs.get("SMALL", 0.5)) if maj_bs else None
+            ),
             "number_probability": next(
-                p["probability"]
-                for p in number_predictions
-                if p["number"] == top_number
+                (
+                    p["probability"]
+                    for p in number_predictions
+                    if p["number"] == top_number
+                ),
+                number_predictions[0]["probability"] if number_predictions else 0.1,
             ),
             "color_probability": color_predictions[0]["probability"],
-            "big_small_probability": big_small_predictions[0]["probability"],
+            "big_small_probability": (
+                None
+                if skip_tip
+                else big_small_predictions[0]["probability"]
+            ),
             "confidence_score": confidence["confidence_score"],
             "confidence_level": confidence["confidence_level"],
             "model_agreement": confidence["model_agreement"],
@@ -553,7 +825,8 @@ class EnsemblePredictor:
             "sample_size": len(history),
             "models_used": list(outputs.keys()),
             "disclaimer": (
-                "Past Big/Small data is analyzed first; tip follows that analysis."
+                "Production tip authority is gradient_boosting. "
+                "majority_w8 is diagnostic only and never used as silent fallback."
             ),
         }
 
@@ -581,7 +854,8 @@ def build_prediction_export(
     target = str(target_period)
     acc = live_accuracy or {}
     skip = bool(ensemble_result.get("skip_tip"))
-    tip_bs = None if skip else ensemble_result["top_big_small"]
+    unavailable = bool(ensemble_result.get("prediction_unavailable"))
+    tip_bs = None if skip else ensemble_result.get("top_big_small")
     bs_analysis = ensemble_result.get("bs_analysis") or {}
     analysis_block = bs_analysis.get("analysis") if isinstance(bs_analysis, dict) else None
     tip_meta = bs_analysis.get("tip") if isinstance(bs_analysis, dict) else None
@@ -592,9 +866,23 @@ def build_prediction_export(
         tip_number = tip_meta.get("number")
         tip_numbers = tip_meta.get("numbers") or []
         tip_number_pct = tip_meta.get("number_pct")
-    if tip_number is None:
+    if tip_number is None and not skip:
         tip_number = ensemble_result.get("top_number")
+
+    decision = (
+        ensemble_result.get("decision_strategy")
+        or ensemble_result.get("bs_source")
+        or PREDICTION_MODEL
+    )
+    if unavailable:
+        action = "PREDICTION_UNAVAILABLE"
+    elif skip:
+        action = "WAIT"
+    else:
+        action = "TIP"
+
     return {
+        "target_period": target,
         "period": target,
         "next_period": target,
         "next_serial": period_serial(target),
@@ -602,32 +890,61 @@ def build_prediction_export(
         "current_serial": period_serial(current) if current else None,
         "focus": "big_small",
         "skip": skip,
-        "action": "WAIT" if skip else "TIP",
+        "action": action,
+        "status": (
+            "PREDICTION_AVAILABLE"
+            if not skip
+            else "PREDICTION_UNAVAILABLE"
+        ),
         "analysis": analysis_block,
         "tip_reason": (tip_meta or {}).get("reason")
         if isinstance(tip_meta, dict)
         else None,
-        "prediction": {
+        "prediction": tip_bs,
+        "prediction_detail": {
             "big_small": tip_bs,
             "number": tip_number,
             "numbers": tip_numbers,
         },
+        "probability_big": ensemble_result.get("probability_big"),
+        "probability_small": ensemble_result.get("probability_small"),
         "probabilities": {
-            "big_small": ensemble_result["big_small_probability"],
+            "big_small": ensemble_result.get("big_small_probability"),
+            "probability_big": ensemble_result.get("probability_big"),
+            "probability_small": ensemble_result.get("probability_small"),
             "number": round(float(tip_number_pct or 0) / 100.0, 4)
             if tip_number_pct is not None
             else ensemble_result.get("number_probability"),
         },
-        "confidence": ensemble_result["confidence_score"],
-        "confidence_level": ensemble_result["confidence_level"],
+        "confidence": ensemble_result.get("confidence_score"),
+        "confidence_level": ensemble_result.get("confidence_level"),
         "model_agreement": ensemble_result.get("model_agreement"),
-        "strategy": ensemble_result.get("bs_source"),
+        "strategy": decision,
+        "decision_strategy": decision,
+        "model_name": ensemble_result.get("model_name") or decision,
+        "model_version": ensemble_result.get("model_version"),
+        "trained_rows": ensemble_result.get("trained_on_rows"),
+        "trained_on_rows": ensemble_result.get("trained_on_rows"),
+        "trained_until_period": ensemble_result.get("trained_until_period"),
+        "candidate_models": ensemble_result.get("candidate_models"),
+        "ml_is_tip_authority": bool(ensemble_result.get("ml_is_tip_authority")),
         "live_accuracy": {
             "big_small_pct": acc.get("big_small_accuracy"),
             "number_pct": acc.get("number_accuracy"),
-            "sample": acc.get("total_predictions"),
-            "note": "Last-10 BS + number frequency tip.",
+            "sample": acc.get("big_small_scored") or acc.get("total_predictions"),
+            "wait_excluded": acc.get("wait_excluded"),
+            "last_10": acc.get("last_10"),
+            "last_25": acc.get("last_25"),
+            "last_50": acc.get("last_50"),
+            "last_100": acc.get("last_100"),
+            "note": "WAIT/UNAVAILABLE excluded from BS accuracy. Tip = decision_strategy.",
         },
         "generated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
-        "disclaimer": "BS + number from last-10 analysis only. Number hit~10% expected.",
+        "prediction_timestamp": datetime.now(timezone.utc)
+        .replace(microsecond=0)
+        .isoformat(),
+        "disclaimer": (
+            "Probability is a model output, not guaranteed accuracy. "
+            "The production engine has no majority or frequency fallback."
+        ),
     }

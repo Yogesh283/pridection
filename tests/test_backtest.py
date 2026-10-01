@@ -21,7 +21,8 @@ def _rounds(n: int = 80):
 
 
 def test_backtest_no_future_and_metrics():
-    report = backtest_history(_rounds(80), min_history=20, use_ensemble=True)
+    # Legacy backtest remains diagnostic; production requires >=200 rounds.
+    report = backtest_history(_rounds(80), min_history=20, use_ensemble=False)
     assert report["total_predictions"] > 0
     assert 0.0 <= report["number_accuracy"] <= 100.0
     assert 0.0 <= report["color_accuracy"] <= 100.0

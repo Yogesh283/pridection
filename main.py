@@ -89,6 +89,28 @@ def cmd_predict() -> int:
         ):
             handler.setLevel(logging.ERROR)
 
+    # Use the same guarded, persisted path as continuous production.
+    bundle = AnalyzerRunner().generate_prediction(force=True, train_ml=False)
+    if not bundle:
+        print("PREDICTION_UNAVAILABLE")
+        return 1
+    live_result = bundle["result"]
+    if live_result.get("skip_tip"):
+        print("PREDICTION_UNAVAILABLE")
+        print(
+            f"Reason: {live_result.get('unavailable_reason') or 'model_not_ready'}"
+        )
+        return 0
+    print(f"target_period: {bundle['target_period']}")
+    print(f"prediction: {live_result['top_big_small']}")
+    print(f"probability_big: {live_result.get('probability_big')}")
+    print(f"probability_small: {live_result.get('probability_small')}")
+    print(f"confidence: {live_result.get('confidence_score')}")
+    print(f"model_name: {live_result.get('model_name')}")
+    print(f"model_version: {live_result.get('model_version')}")
+    print("status: PREDICTION_AVAILABLE")
+    return 0
+
     # Always refresh from API first so prediction tracks the latest settled round.
     summary = collect_once()
     db = Database()
@@ -142,39 +164,50 @@ def cmd_predict() -> int:
 
     export = build_prediction_export(target, result, current_period=current)
     write_prediction_json(export)
-    db.save_prediction(
-        {
-            "target_period": target,
-            "predicted_number": result["top_number"],
-            "predicted_color": result["top_color"],
-            "predicted_big_small": result["top_big_small"],
-            "number_probability": result["number_probability"],
-            "color_probability": result["color_probability"],
-            "big_small_probability": result["big_small_probability"],
-            "model_name": "ensemble",
-        },
-        update_existing=True,
-    )
+    decision = str(result.get("decision_strategy") or "gradient_boosting")
+    if not result.get("skip_tip") and result.get("top_big_small"):
+        db.save_prediction(
+            {
+                "target_period": target,
+                "predicted_number": result.get("top_number"),
+                "predicted_color": result.get("top_color"),
+                "predicted_big_small": result["top_big_small"],
+                "number_probability": result.get("number_probability"),
+                "color_probability": result.get("color_probability"),
+                "big_small_probability": result.get("big_small_probability"),
+                "model_name": decision,
+                "decision_strategy": decision,
+                "status": "TIP",
+            },
+            update_existing=True,
+        )
 
     # Clean output only — no logs noise for the user-facing lines.
     print("")
     print("====================================")
-    print("  NEXT PREDICTION (Color + Big/Small)")
+    print("  NEXT PREDICTION (Gradient Boosting)")
     print("====================================")
     print(f"Period     : {target}")
-    print(f"Big/Small  : {result['top_big_small']}")
-    print(f"Color      : {result['top_color']}")
+    if result.get("skip_tip"):
+        print(f"Big/Small  : {result.get('decision_strategy')}")
+        if result.get("unavailable_reason"):
+            print(f"Reason     : {result.get('unavailable_reason')}")
+    else:
+        print(f"Big/Small  : {result['top_big_small']}")
+        if result.get("probability_big") is not None:
+            print(
+                f"Probability: BIG {float(result['probability_big']):.2f} | "
+                f"SMALL {float(result['probability_small']):.2f}"
+            )
     print(
         f"Confidence : {result['confidence_level']} "
         f"({result['confidence_score'] * 100:.0f}%)"
     )
-    print(f"Agreement  : {result.get('model_agreement', '-')}")
-    print(
-        f"Chance     : BS {result['big_small_probability'] * 100:.0f}% | "
-        f"Color {result['color_probability'] * 100:.0f}%"
-    )
-    if result.get("bs_source"):
-        print(f"Strategy   : {result['bs_source']}")
+    print(f"Model      : {decision}")
+    if result.get("model_version"):
+        print(f"Version    : {result.get('model_version')}")
+    if result.get("trained_on_rows"):
+        print(f"Trained on : {result.get('trained_on_rows')} rows")
     print("====================================")
     print("Note: estimate only, guarantee nahi")
     print("")

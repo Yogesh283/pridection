@@ -45,16 +45,16 @@ def test_baseline_models_return_distributions():
         assert set(out["big_small"]) == {"SMALL", "BIG"}
 
 
-def test_ensemble_prediction():
+def test_production_engine_refuses_insufficient_history_without_fallback():
     predictor = EnsemblePredictor()
     result = predictor.predict(_rounds(50), train_ml=False)
     assert result is not None
-    assert 0 <= result["top_number"] <= 9
-    assert result["top_color"] in {"RED", "GREEN", "VIOLET"}
-    assert result["top_big_small"] in {"SMALL", "BIG"}
-    assert result["confidence_level"] in {"LOW", "MEDIUM", "HIGH"}
-    assert result["confidence_score"] < 1.0
-    assert abs(sum(p["probability"] for p in result["number_predictions"]) - 1.0) < 1e-5
+    assert result["top_number"] is None
+    assert result["top_color"] is None
+    assert result["top_big_small"] is None
+    assert result["status"] == "PREDICTION_UNAVAILABLE"
+    assert result["skip_tip"] is True
+    assert "insufficient_history" in result["unavailable_reason"]
     assert abs(sum(p["probability"] for p in result["big_small_predictions"]) - 1.0) < 1e-5
 
 

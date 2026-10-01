@@ -73,56 +73,41 @@ class AnalyzerRunner:
         self._last_export: dict[str, Any] | None = None
 
     def resolve_pending(self) -> list[dict[str, Any]]:
-        """Resolve open predictions; return comparison rows for CLI."""
+        """Resolve open predictions by exact target_period; orphans stay open."""
+        summary = self.db.resolve_pending_against_rounds()
         comparisons: list[dict[str, Any]] = []
-        pending = self.db.get_unresolved_predictions()
-        if not pending:
-            return comparisons
-        rounds_by_period = {r["period"]: r for r in self.db.get_rounds()}
-        for pred in pending:
-            actual = rounds_by_period.get(pred["target_period"])
-            if not actual:
+        for d in summary.get("details") or []:
+            if not d.get("changed"):
                 continue
-            self.db.resolve_prediction(
-                pred["id"],
-                actual_number=int(actual["number"]),
-                actual_color=actual.get("color"),
-            )
-            actual_number = int(actual["number"])
-            actual_bs = big_small_label(actual_number)
-            actual_color = primary_color(actual.get("color")) or actual.get("color")
-            pred_bs = pred.get("predicted_big_small") or (
-                big_small_label(int(pred["predicted_number"]))
-                if pred.get("predicted_number") is not None
-                else None
-            )
+            pred_rows = [
+                p
+                for p in self.db.get_resolved_predictions(limit=50)
+                if int(p["id"]) == int(d["id"])
+            ]
+            if not pred_rows:
+                continue
+            pred = pred_rows[-1]
             comparisons.append(
                 {
                     "period": pred["target_period"],
-                    "pred_bs": pred_bs,
+                    "pred_bs": pred.get("predicted_big_small"),
                     "pred_number": pred.get("predicted_number"),
                     "pred_color": pred.get("predicted_color"),
-                    "actual_bs": actual_bs,
-                    "actual_number": actual_number,
-                    "actual_color": actual_color,
-                    "bs_ok": pred_bs == actual_bs,
-                    "color_ok": bool(
-                        pred.get("predicted_color")
-                        and actual_color
-                        and set(str(pred["predicted_color"]).upper().split(","))
-                        & set(str(actual_color).upper().split(","))
-                    ),
-                    "number_ok": pred.get("predicted_number") == actual_number,
+                    "actual_bs": pred.get("actual_big_small"),
+                    "actual_number": pred.get("actual_number"),
+                    "actual_color": pred.get("actual_color"),
+                    "bs_ok": pred.get("big_small_correct") == 1,
+                    "color_ok": pred.get("color_correct") == 1,
+                    "number_ok": pred.get("number_correct") == 1,
+                    "status": pred.get("status"),
                 }
             )
-            logger.info(
-                "Resolved %s pred=%s/%s actual=%s/%s",
-                pred["target_period"],
-                pred.get("predicted_number"),
-                pred.get("predicted_color"),
-                actual_number,
-                actual.get("color"),
-            )
+        logger.info(
+            "resolve_pending: pending=%s resolved_now=%s orphans=%s",
+            summary.get("pending"),
+            summary.get("resolved_now"),
+            summary.get("orphans_left"),
+        )
         return comparisons
 
     def historical_number_accuracy(self) -> float | None:
@@ -147,6 +132,7 @@ class AnalyzerRunner:
         self, force: bool = True, *, train_ml: bool | None = None
     ) -> dict[str, Any] | None:
         # Prefer official history CDN for correct issueNumber / serial.
+        sync: dict[str, Any] | None = None
         try:
             sync = sync_history_into_db(self.db)
             synced = (sync.get("latest") or {}).get("period")
@@ -154,16 +140,61 @@ class AnalyzerRunner:
                 self.last_seen_period = str(synced)
         except Exception as exc:  # noqa: BLE001
             logger.warning("history sync failed: %s", exc)
+            sync = None
+
+        # Resolve any tips whose target rounds already exist.
+        self.resolve_pending()
 
         rounds = self.db.get_rounds()
         if len(rounds) < 5:
             print("DB mein 5 rounds se kam hain — wait...")
             return None
 
-        latest = rounds[-1]
-        current_period = str(latest["period"])
+        # Authoritative latest must come from hist CDN when available.
+        hist_latest = (sync or {}).get("latest") or {}
+        if hist_latest.get("period"):
+            current_period = str(hist_latest["period"])
+        else:
+            # Without confirmed hist latest, do not invent a target tip.
+            logger.warning("TARGET_NOT_CONFIRMED: hist latest missing")
+            export = {
+                "action": "WAIT",
+                "skip": True,
+                "status": "TARGET_NOT_CONFIRMED",
+                "tip_reason": "hist CDN latest period unavailable",
+                "prediction": {"big_small": None, "number": None},
+                "generated_at": __import__("datetime").datetime.now(
+                    __import__("datetime").timezone.utc
+                )
+                .replace(microsecond=0)
+                .isoformat(),
+            }
+            write_prediction_json(export)
+            self._write_live_status(export)
+            return {
+                "prediction_id": None,
+                "target_period": None,
+                "result": {"skip_tip": True, "bs_source": "target_not_confirmed"},
+                "export": export,
+                "latest": rounds[-1],
+                "skipped": True,
+            }
+
         self.last_seen_period = current_period
         target_period = guess_next_period(current_period)
+
+        # Never tip for a period that already settled in DB.
+        if self.db.period_exists(target_period):
+            logger.info(
+                "target %s already settled — advancing from DB latest", target_period
+            )
+            latest_db = self.db.get_latest_round()
+            if latest_db:
+                current_period = str(latest_db["period"])
+                target_period = guess_next_period(current_period)
+            if self.db.period_exists(target_period):
+                logger.warning("TARGET_NOT_CONFIRMED: next still in DB (%s)", target_period)
+                return None
 
         # Skip rewrite if tip already matches latest settled + 1.
         if (
@@ -177,67 +208,81 @@ class AnalyzerRunner:
                 if pending["target_period"] == target_period:
                     return None
 
-        do_train = (
-            bool(train_ml)
-            if train_ml is not None
-            else not getattr(self, "_ml_trained", False)
-        )
         result = self.predictor.predict(
             rounds,
             historical_number_accuracy=self.historical_number_accuracy(),
             historical_big_small_accuracy=self.historical_big_small_accuracy(),
-            train_ml=do_train,
+            train_ml=False,
             focus="big_small",
         )
         if not result:
             return None
-        if do_train:
-            self._ml_trained = True
 
+        decision = str(
+            result.get("decision_strategy")
+            or result.get("model_name")
+            or "PREDICTION_UNAVAILABLE"
+        )
         resolved = self.db.get_resolved_predictions()
-        live_acc = compute_accuracy_report(resolved) if resolved else None
+        model_resolved = [
+            row
+            for row in resolved
+            if str(row.get("decision_strategy") or row.get("model_name") or "")
+            == decision
+        ]
+        live_acc = (
+            compute_accuracy_report(model_resolved) if model_resolved else None
+        )
         export = build_prediction_export(
             target_period,
             result,
             current_period=current_period,
             live_accuracy=live_acc,
         )
+        export["model_status"] = self.predictor.production.status()
         write_prediction_json(export)
         self.last_prediction_period = target_period
         self._last_export = export
         self._write_live_status(export)
 
-        # Weak/tie signals: show WAIT on site, do NOT save as scored tip.
+        # Save every opportunity. WAIT rows remain explicitly unscored and provide
+        # the denominator needed for honest high-confidence coverage.
         pred_id = None
-        if not result.get("skip_tip"):
+        if result.get("model_name"):
             pred_id = self.db.save_prediction(
                 {
                     "target_period": target_period,
-                    "predicted_number": result["top_number"],
-                    "predicted_color": result["top_color"],
-                    "predicted_big_small": result["top_big_small"],
-                    "number_probability": result["number_probability"],
-                    "color_probability": result["color_probability"],
-                    "big_small_probability": result["big_small_probability"],
-                    "model_name": "ensemble",
+                    "predicted_number": result.get("top_number"),
+                    "predicted_color": result.get("top_color"),
+                    "predicted_big_small": result.get("top_big_small"),
+                    "number_probability": result.get("number_probability"),
+                    "color_probability": result.get("color_probability"),
+                    "big_small_probability": result.get("big_small_probability"),
+                    "model_name": result.get("model_name") or decision,
+                    "model_version": result.get("model_version"),
+                    "decision_strategy": decision,
+                    "trained_until_period": result.get("trained_until_period"),
+                    "trained_rows": result.get("trained_on_rows"),
+                    "status": "WAIT" if result.get("skip_tip") else "TIP",
                 },
                 update_existing=True,
             )
             if live_acc:
                 self.db.upsert_model_metrics(
-                    "ensemble",
-                    sample_size=live_acc["total_predictions"],
+                    decision,
+                    sample_size=int(live_acc.get("big_small_scored") or 0),
                     number_accuracy=live_acc["number_accuracy"],
                     color_accuracy=live_acc["color_accuracy"],
-                    big_small_accuracy=live_acc.get("big_small_accuracy", 0.0),
+                    big_small_accuracy=float(live_acc.get("big_small_accuracy") or 0.0),
                 )
 
+        latest_row = self.db.get_round_by_period(current_period) or rounds[-1]
         return {
             "prediction_id": pred_id,
             "target_period": target_period,
             "result": result,
             "export": export,
-            "latest": latest,
+            "latest": latest_row,
             "skipped": bool(result.get("skip_tip")),
         }
 
@@ -245,28 +290,60 @@ class AnalyzerRunner:
         from api.history_sync import period_serial
 
         result = bundle["result"]
+        export = bundle.get("export") or {}
         target = str(bundle["target_period"])
         current = str((bundle.get("latest") or {}).get("period") or "")
+        live_acc = (export.get("live_accuracy") or {})
+        model_status = export.get("model_status") or result.get("gb_status") or {}
         print("")
-        print("---------- PREDICT (Big/Small only) ----------")
+        print("---------- PREDICT (Big/Small) ----------")
         if current:
             print(f"Settled   : {current} (serial {period_serial(current)})")
         print(f"Next      : {target} (serial {period_serial(target)})")
         if result.get("skip_tip") or bundle.get("skipped"):
-            print("Big/Small : WAIT (weak/tie — tip skipped)")
+            status = result.get("decision_strategy") or "WAIT"
+            if "UNAVAILABLE" in str(status).upper() or result.get("prediction_unavailable"):
+                print("Big/Small : PREDICTION_UNAVAILABLE")
+                print(f"Reason    : {result.get('unavailable_reason')}")
+            else:
+                print("Big/Small : WAIT (tip skipped)")
         else:
             print(f"Big/Small : {result['top_big_small']}")
+            if result.get("probability_big") is not None:
+                print(
+                    f"Prob      : BIG {float(result['probability_big']):.2f} | "
+                    f"SMALL {float(result['probability_small']):.2f}"
+                )
         print(
-            f"Conf      : {result['confidence_level']} "
-            f"({result['confidence_score'] * 100:.0f}%)"
+            f"Conf      : {result.get('confidence_level')} "
+            f"({float(result.get('confidence_score') or 0) * 100:.0f}%)"
         )
-        print(f"Strategy  : {result.get('bs_source')}")
-        print("---------------------------------------------")
+        print(f"Model     : {result.get('decision_strategy') or result.get('model_name')}")
+        if result.get("model_version"):
+            print(f"Version   : {result.get('model_version')}")
+        if result.get("trained_on_rows"):
+            print(f"Trained   : {result.get('trained_on_rows')} rows")
+        mstat = model_status.get("model_status") or model_status.get("status")
+        if mstat:
+            print(f"Status    : {mstat}")
+        sample = live_acc.get("sample")
+        bs_pct = live_acc.get("big_small_pct")
+        if sample is not None and int(sample) >= 5 and bs_pct is not None:
+            print(f"Live Acc  : {float(bs_pct):.1f}% (n={sample})")
+        else:
+            print(f"Live Acc  : n/a (need more resolved tips; n={sample or 0})")
+        print("----------------------------------------")
         print("")
 
     def print_comparison(self, row: dict[str, Any]) -> None:
-        # Win/Lost result blocks removed from terminal (fully cleared).
-        return
+        pred = row.get("pred_bs") or "—"
+        actual = row.get("actual_bs") or "—"
+        ok = row.get("bs_ok")
+        mark = "WIN" if ok else ("LOST" if ok is False else "—")
+        print(
+            f"RESULT {row.get('period')}: pred={pred} actual={actual} "
+            f"num={row.get('pred_number')}->{row.get('actual_number')} [{mark}]"
+        )
 
     def render_dashboard(self, prediction_bundle: dict[str, Any] | None = None) -> None:
         if prediction_bundle:
@@ -320,6 +397,10 @@ class AnalyzerRunner:
             "last_prediction_period": self.last_prediction_period,
             "seconds_to_predict_window": round(seconds_until_predict_window(), 1),
             "prediction": export,
+            "model_name": (export or {}).get("model_name")
+            or (export or {}).get("decision_strategy"),
+            "model_status": (export or {}).get("model_status"),
+            "live_accuracy": (export or {}).get("live_accuracy"),
         }
         path = Path(ROOT_DIR) / "live_status.json"
         path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -363,7 +444,7 @@ class AnalyzerRunner:
         except Exception as exc:  # noqa: BLE001
             logger.warning("bootstrap hist sync failed: %s", exc)
         self.resolve_pending()
-        pred = self.generate_prediction(force=True, train_ml=False)
+        pred = self.generate_prediction(force=True, train_ml=True)
         if pred:
             self.print_prediction(pred)
 
@@ -399,7 +480,9 @@ class AnalyzerRunner:
 
                     # New settled round -> resolve + fresh next tip immediately.
                     if current_period != last_published_current:
-                        self.resolve_pending()
+                        comparisons = self.resolve_pending()
+                        for row in comparisons[-5:]:
+                            self.print_comparison(row)
                         nxt = self.generate_prediction(force=True, train_ml=False)
                         if nxt:
                             self.print_prediction(nxt)
@@ -441,7 +524,7 @@ def run_dashboard_snapshot(db: Database | None = None) -> None:
             rounds,
             historical_number_accuracy=runner.historical_number_accuracy(),
             historical_big_small_accuracy=runner.historical_big_small_accuracy(),
-            train_ml=False,
+            train_ml=True,
             focus="big_small",
         )
         if result:

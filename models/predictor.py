@@ -343,13 +343,16 @@ class MLModelBundle:
         x, y_num, y_col, y_bs, keys = build_supervised_dataset(
             rounds, min_history=20
         )
-        if len(x) < MIN_TRAINING_SAMPLES:
+        # Need enough chronological rows; do not require full MIN_TRAINING_SAMPLES
+        # after warm-up (that previously blocked all live ML training).
+        min_fit = max(80, MIN_TRAINING_SAMPLES // 2)
+        if len(x) < min_fit:
             self.trained = False
             return False
 
         # Chronological split: first 80% train, last 20% held out (not shuffled).
         split = int(len(x) * 0.8)
-        if split < 50:
+        if split < 40:
             self.trained = False
             return False
 
@@ -397,7 +400,8 @@ class MLModelBundle:
             pred = (votes >= 0.5).astype(int)
             self.bs_val_accuracy = float((pred == y_bs_val).mean() * 100.0)
             logger.info(
-                "ML Big/Small held-out accuracy: %.2f%% (n=%s)",
+                "ML Big/Small held-out accuracy: %.2f%% (n=%s) "
+                "[NOT walk-forward OOS; not live tip authority]",
                 self.bs_val_accuracy,
                 len(y_bs_val),
             )

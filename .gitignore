@@ -9,6 +9,7 @@ live_status.json
 exports/*.csv
 exports/*.json
 exports/*.txt
+exports/*.log
 logs/*.log
 !logs/.gitkeep
 !storage/.gitkeep

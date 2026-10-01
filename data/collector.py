@@ -39,6 +39,8 @@ class Collector:
                 color=record.get("color"),
                 timestamp=record.get("timestamp"),
                 raw_json=record.get("raw_json"),
+                source="dearapi",
+                color_raw=record.get("color"),
             )
             if ok:
                 inserted += 1

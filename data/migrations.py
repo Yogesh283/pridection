@@ -66,6 +66,14 @@ ALTER_COLUMNS = [
     ("predictions", "actual_big_small", "VARCHAR(16) NULL"),
     ("predictions", "big_small_correct", "TINYINT NULL"),
     ("model_metrics", "big_small_accuracy", "DOUBLE NULL"),
+    # Integrity / naming (additive only).
+    ("rounds", "source", "VARCHAR(32) NULL"),
+    ("rounds", "color_raw", "VARCHAR(64) NULL"),
+    ("predictions", "decision_strategy", "VARCHAR(64) NULL"),
+    ("predictions", "status", "VARCHAR(32) NULL"),
+    ("predictions", "model_version", "VARCHAR(128) NULL"),
+    ("predictions", "trained_until_period", "VARCHAR(64) NULL"),
+    ("predictions", "trained_rows", "INT NULL"),
 ]
 
 

@@ -9,6 +9,7 @@ from typing import Any
 import requests
 
 from analysis.statistics import big_small_label
+from api.color_canon import canonical_color
 from config import COLOR_MAP
 from data.database import Database
 
@@ -25,20 +26,21 @@ def fetch_history_list() -> list[dict[str, Any]]:
 
 def color_from_hist_row(row: dict[str, Any]) -> str | None:
     raw = row.get("color") or row.get("colour")
-    if raw:
-        return str(raw).lower()
     try:
         n = int(row["number"])
     except (KeyError, TypeError, ValueError):
-        return None
-    mapped = COLOR_MAP.get(n)
-    return mapped.lower() if mapped else None
+        n = None
+    if raw:
+        return canonical_color(raw, n)
+    if n is not None:
+        return canonical_color(COLOR_MAP.get(n), n)
+    return None
 
 
 def sync_history_into_db(db: Database | None = None) -> dict[str, Any]:
     """
-    Upsert latest history page. Returns latest settled row (API newest-first).
-    Prefer this over dearapi when issueNumber / serial must match the game.
+    Upsert latest history page from official CDN (highest trust for issueNumber).
+    Returns latest settled row (API newest-first).
     """
     db = db or Database()
     rows = fetch_history_list()
@@ -48,12 +50,15 @@ def sync_history_into_db(db: Database | None = None) -> dict[str, Any]:
         if not period:
             continue
         number = int(row["number"])
+        raw_color = row.get("color") or row.get("colour")
         ok = db.upsert_round(
             period=period,
             number=number,
             color=color_from_hist_row(row),
             timestamp=None,
             raw_json=json.dumps(row, ensure_ascii=False),
+            source="hist_cdn",
+            color_raw=str(raw_color) if raw_color is not None else None,
         )
         if ok:
             inserted += 1

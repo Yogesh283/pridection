@@ -175,64 +175,23 @@ def normalize_color_token(token: str) -> str | None:
 
 
 def normalize_color_value(raw_color: Any, number: int | None = None) -> str | None:
-    """
-    Normalize color strings.
+    """Canonical UPPER color for storage/eval (preserves VIOLET compounds)."""
+    from api.color_canon import canonical_color
 
-    API may return compound colours such as "red,violet".
-    Prefer API colour; fall back to COLOR_MAP only when missing.
-    """
-    if raw_color is None or raw_color == "":
-        if number is not None and number in COLOR_MAP:
-            return COLOR_MAP[number]
-        return None
-
-    if isinstance(raw_color, (list, tuple)):
-        parts = [normalize_color_token(str(x)) for x in raw_color]
-        parts = [p for p in parts if p]
-        return ",".join(parts) if parts else None
-
-    text = str(raw_color).strip()
-    if "," in text or "/" in text or "|" in text:
-        separators = [",", "/", "|"]
-        for sep in separators:
-            if sep in text:
-                parts = [normalize_color_token(p) for p in text.split(sep)]
-                parts = [p for p in parts if p]
-                return ",".join(parts) if parts else None
-
-    single = normalize_color_token(text)
-    if single:
-        return single
-
-    # Already normalized compound like RED,VIOLET
-    upper = text.upper().replace(" ", "")
-    if upper in {"RED", "GREEN", "VIOLET", "RED,VIOLET", "GREEN,VIOLET", "VIOLET,RED", "VIOLET,GREEN"}:
-        parts = [normalize_color_token(p) or p for p in upper.split(",")]
-        return ",".join(parts)
-
-    return text.upper()
+    return canonical_color(raw_color, number)
 
 
 def primary_color(color: str | None) -> str | None:
     """Choose a single primary color for classification/metrics."""
-    if not color:
-        return None
-    parts = [p.strip().upper() for p in color.split(",") if p.strip()]
-    if not parts:
-        return None
-    # Prefer RED/GREEN over VIOLET for primary label when compound.
-    for preferred in ("RED", "GREEN"):
-        if preferred in parts:
-            return preferred
-    if "VIOLET" in parts:
-        return "VIOLET"
-    return parts[0]
+    from api.color_canon import canonical_color, primary_from_canonical
+
+    return primary_from_canonical(canonical_color(color))
 
 
 def has_violet(color: str | None) -> bool:
     if not color:
         return False
-    return "VIOLET" in color.upper()
+    return "VIOLET" in str(color).upper()
 
 
 def normalize_number(raw_number: Any) -> int | None:

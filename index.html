@@ -30,7 +30,7 @@
         var(--bg0);
     }
     main {
-      max-width: 520px;
+      max-width: 560px;
       margin: 0 auto;
       padding: 2.5rem 1.25rem 3rem;
     }
@@ -82,7 +82,7 @@
       margin: 0.15rem 0;
     }
     .alts { font-size: 0.85rem; color: var(--muted); margin-top: 0.35rem; }
-    .meta { margin-top: 0.85rem; font-size: 0.85rem; color: var(--muted); line-height: 1.5; }
+    .meta { margin-top: 0.85rem; font-size: 0.85rem; color: var(--muted); line-height: 1.55; }
     .err { color: #ffb4b4; font-size: 0.9rem; }
     .dot {
       display: inline-block;
@@ -102,7 +102,7 @@
 </head>
 <body>
   <main>
-    <h1>WinGo 30 — Big/Small + Number</h1>
+    <h1>WinGo 30 — Live Tip</h1>
     <p class="sub"><span class="dot" id="liveDot"></span><span id="liveText">Connecting…</span></p>
 
     <div class="card" id="box">
@@ -110,7 +110,8 @@
     </div>
 
     <footer>
-      Big/Small + Number from last 10 rounds. Number long-run ~10% hit is normal.
+      Live tip authority = current production model (gradient boosting family).
+      Probability is model output, not guaranteed accuracy. majority_w8 is diagnostic only.
     </footer>
   </main>
   <script>
@@ -121,15 +122,35 @@
       return Math.max(0, Math.ceil(30 - into));
     }
 
+    function pct(v) {
+      if (v == null || v === "") return null;
+      const n = Number(v);
+      if (!Number.isFinite(n)) return null;
+      return Math.round((n <= 1 ? n * 100 : n));
+    }
+
     function render(d, status) {
       const box = document.getElementById("box");
-      const p = d.prediction || {};
-      const conf = Math.round((d.confidence || 0) * 100);
-      const bs = (d.skip || d.action === "WAIT") ? "WAIT" : (p.big_small || "—");
+      const p = (typeof d.prediction === "object")
+        ? (d.prediction || {})
+        : (d.prediction_detail || { big_small: d.prediction });
+      const conf = pct(d.confidence) ?? 0;
+      const unavailable = d.action === "PREDICTION_UNAVAILABLE" || d.status === "PREDICTION_UNAVAILABLE";
+      const bs = unavailable
+        ? "UNAVAILABLE"
+        : ((d.skip || d.action === "WAIT") ? "WAIT" : (p.big_small || "—"));
       const num = (p.number != null && p.number !== "") ? String(p.number) : "—";
       const alts = (p.numbers || []).map(x => x.number + "(" + (x.pct ?? Math.round((x.probability||0)*100)) + "%)").join(" · ");
-      const bsProb = Math.round((d.probabilities?.big_small || 0) * 100);
-      const numProb = d.probabilities?.number != null ? Math.round(Number(d.probabilities.number) * 100) : null;
+      const pBig = pct(d.probability_big ?? d.probabilities?.probability_big);
+      const pSmall = pct(d.probability_small ?? d.probabilities?.probability_small);
+      const bsProb = pct(d.probabilities?.big_small) ?? conf;
+      const numProb = d.probabilities?.number != null ? pct(d.probabilities.number) : null;
+      const model = d.model_name || d.decision_strategy || d.strategy || "—";
+      const version = d.model_version || "—";
+      const trained = d.trained_on_rows ?? d.trained_rows ?? "—";
+      const mstat = d.model_status?.model_status || d.model_status?.status || status?.model_status?.model_status || "—";
+      const liveBs = d.live_accuracy?.big_small_pct;
+      const liveN = d.live_accuracy?.sample ?? 0;
       const left = roundCountdown();
       const key = (d.next_period || d.period || "") + "|" + bs + "|" + num + "|" + (d.action || "");
       const changed = key && key !== lastKey;
@@ -143,37 +164,35 @@
         <div class="period" style="font-size:0.95rem;margin-bottom:0.35rem">
           ${d.current_period || "—"}
           <span class="meta"> serial <b>${d.current_serial || "—"}</b>
-          · last# <b>${d.analysis?.last_number ?? "—"}</b>
-          · ${(d.analysis?.last10_numbers || []).join(",") || "—"}</span>
+          · last# <b>${d.analysis?.last_number ?? "—"}</b></span>
         </div>
         <div class="label">Next tip</div>
         <div class="period">
-          ${d.next_period || d.period || "—"}
+          ${d.next_period || d.target_period || d.period || "—"}
           <span class="meta"> serial <b>${d.next_serial || "—"}</b></span>
         </div>
         <div class="tip">
-          <div class="label">${d.skip ? "BS weak — number still shown" : "Prediction"}</div>
-          <strong class="${bs === "WAIT" ? "" : bs}">${bs}</strong>
+          <div class="label">${unavailable ? "Model status" : (d.skip ? "BS weak / WAIT" : "Prediction")}</div>
+          <strong class="${(bs === "BIG" || bs === "SMALL") ? bs : ""}">${bs}</strong>
+          <div class="meta" style="margin-top:0.55rem">
+            ${pBig != null && pSmall != null
+              ? (`BIG <b>${pBig}%</b> · SMALL <b>${pSmall}%</b>`)
+              : (unavailable ? (d.tip_reason || "unavailable") : (bsProb + "% tip side"))}
+          </div>
           <div class="label" style="margin-top:0.7rem">Number</div>
           <div class="num">${num}</div>
-          <div class="meta">${d.skip ? "BS skipped" : (bsProb + "% BS")}
-            ${numProb != null ? (" · num " + numProb + "% in last10") : ""}</div>
+          <div class="meta">${numProb != null ? ("num " + numProb + "%") : "number is secondary"}</div>
           ${alts ? `<div class="alts">Top: ${alts}</div>` : ""}
         </div>
         <div class="meta">
+          Model: <b>${model}</b><br/>
+          Version: <b>${version}</b> · Trained rows: <b>${trained}</b> · Status: <b>${mstat}</b><br/>
+          Confidence: <b>${d.confidence_level || "—"}</b> (${conf}%)<br/>
+          Live accuracy:
+          <b>${liveBs != null && Number(liveN) >= 5 ? Number(liveBs).toFixed(1) + "%" : "n/a"}</b>
+          <span>(resolved n=${liveN})</span><br/>
           Reason: <b>${d.tip_reason || "—"}</b><br/>
-          Analysis (last <b>10</b>):
-          ${(d.analysis?.last10 || []).join(",") || "—"}
-          · nums ${(d.analysis?.last10_numbers || []).join(",") || "—"}
-          · follow ${d.analysis?.recent_follow_pct ?? "—"}%
-          · flip ${d.analysis?.recent_flip_pct ?? "—"}%<br/>
-          Confidence: <b>${d.confidence_level || "—"}</b> (${conf}%) · ${d.strategy || "—"}<br/>
-          Settled: BS
-          <b>${d.live_accuracy?.big_small_pct != null ? Number(d.live_accuracy.big_small_pct).toFixed(1) + "%" : "—"}</b>
-          · Number
-          <b>${d.live_accuracy?.number_pct != null ? Number(d.live_accuracy.number_pct).toFixed(1) + "%" : "—"}</b>
-          <span>(n=${d.live_accuracy?.sample ?? 0})</span><br/>
-          Updated: ${d.generated_at || "—"}
+          Updated: ${d.prediction_timestamp || d.generated_at || "—"}
         </div>
       `;
       if (changed) setTimeout(() => box.classList.remove("flash"), 600);
@@ -185,7 +204,7 @@
         : (d.generated_at ? Math.max(0, Math.floor((Date.now() - Date.parse(d.generated_at)) / 1000)) : null);
       if (age != null && age < 90) {
         dot.className = "dot";
-        liveText.textContent = `LIVE BS+Number · refresh 1s · server ${age}s ago`;
+        liveText.textContent = `LIVE · ${model} · refresh 1s · server ${age}s ago`;
       } else {
         dot.className = "dot dead";
         liveText.textContent = age == null
