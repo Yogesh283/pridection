@@ -1,4 +1,4 @@
-"""Analyze past Big/Small rounds, then derive the next tip from that analysis."""
+"""Analyze past Big/Small + number rounds, then derive the next tip."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ def analyze_big_small(
 ) -> dict[str, Any]:
     """
     Step 1 — analyze last N settled rounds (default 10).
-    Step 2 — caller uses this dict to choose TIP / WAIT.
+    Step 2 — caller uses this dict to choose TIP / WAIT + number.
     """
     if not history:
         return {
@@ -29,7 +29,9 @@ def analyze_big_small(
         }
 
     labels = [big_small_label(int(r["number"])) for r in history]
+    numbers = [int(r["number"]) for r in history]
     last = labels[-1]
+    last_num = numbers[-1]
     streak_n = 0
     for x in reversed(labels):
         if x == last:
@@ -38,10 +40,17 @@ def analyze_big_small(
             break
 
     win = labels[-window:] if len(labels) >= window else labels
+    win_nums = numbers[-window:] if len(numbers) >= window else numbers
     counts = Counter(win)
     big_n = int(counts.get("BIG", 0))
     small_n = int(counts.get("SMALL", 0))
     margin = abs(big_n - small_n)
+
+    num_counts = Counter(win_nums)
+    top_nums = [
+        {"number": int(n), "count": int(c), "pct": round(100.0 * c / len(win_nums), 1)}
+        for n, c in num_counts.most_common(5)
+    ]
 
     # follow = same as last, flip = opposite — measure which hit on last 10.
     follow_hits = flip_hits = tested = 0
@@ -64,6 +73,7 @@ def analyze_big_small(
         "analysis_minutes": round(len(win) * 0.5, 1),
         "analysis_rounds": len(win),
         "last_bs": last,
+        "last_number": last_num,
         "streak": streak_n,
         "window": len(win),
         "window_big": big_n,
@@ -75,18 +85,60 @@ def analyze_big_small(
         "recent_follow_pct": rate(follow_hits),
         "recent_flip_pct": rate(flip_hits),
         "last10": win,
+        "last10_numbers": win_nums,
+        "number_top": top_nums,
         "last5": labels[-5:],
+    }
+
+
+def _pick_number(analysis: dict[str, Any], side: str | None) -> dict[str, Any]:
+    """Most frequent digit in last 10; if BS side given, prefer that side."""
+    win_nums = list(analysis.get("last10_numbers") or [])
+    if not win_nums:
+        return {"number": None, "alts": [], "source": "none"}
+
+    def rank(pool: list[int]) -> list[dict[str, Any]]:
+        c = Counter(pool)
+        total = len(pool) or 1
+        return [
+            {
+                "number": int(n),
+                "count": int(cnt),
+                "pct": round(100.0 * cnt / total, 1),
+            }
+            for n, cnt in c.most_common(3)
+        ]
+
+    if side in ("BIG", "SMALL"):
+        side_pool = [n for n in win_nums if big_small_label(n) == side]
+        if side_pool:
+            ranked = rank(side_pool)
+            return {
+                "number": ranked[0]["number"],
+                "alts": ranked,
+                "source": f"last10_freq_{side.lower()}",
+                "pct": ranked[0]["pct"],
+            }
+
+    ranked = rank(win_nums)
+    return {
+        "number": ranked[0]["number"],
+        "alts": ranked,
+        "source": "last10_freq",
+        "pct": ranked[0]["pct"],
     }
 
 
 def tip_from_analysis(analysis: dict[str, Any]) -> dict[str, Any]:
     """
-    Step 2 — tip only when last-10 clearly favors follow OR flip.
-    Old anti-streak forced flip while live follow was ~80% — felt all wrong.
+    Step 2 — tip BS when last-10 clearly favors follow OR flip.
+    Always attach a last-10 frequency number tip.
     """
     if not analysis.get("ok"):
         return {
             "big_small": None,
+            "number": None,
+            "numbers": [],
             "skip": True,
             "action": "WAIT",
             "source": "no_analysis",
@@ -113,8 +165,13 @@ def tip_from_analysis(analysis: dict[str, Any]) -> dict[str, Any]:
     edge = best_pct - other_pct
 
     if best_pct < need_pct or edge < need_edge:
+        num = _pick_number(analysis, None)
         return {
             "big_small": None,
+            "number": num.get("number"),
+            "numbers": num.get("alts") or [],
+            "number_source": num.get("source"),
+            "number_pct": num.get("pct"),
             "skip": True,
             "action": "WAIT",
             "source": "last10_no_edge",
@@ -128,8 +185,13 @@ def tip_from_analysis(analysis: dict[str, Any]) -> dict[str, Any]:
 
     other = "BIG" if best_tip == "SMALL" else "SMALL"
     conf = min(0.70, 0.50 + (best_pct - 50.0) / 100.0)
+    num = _pick_number(analysis, best_tip)
     return {
         "big_small": best_tip,
+        "number": num.get("number"),
+        "numbers": num.get("alts") or [],
+        "number_source": num.get("source"),
+        "number_pct": num.get("pct"),
         "skip": False,
         "action": "TIP",
         "source": f"last10_{best_name}",
@@ -137,7 +199,7 @@ def tip_from_analysis(analysis: dict[str, Any]) -> dict[str, Any]:
         "reason": (
             f"last10 {last10}: {best_name}@{best_pct}% > "
             f"{'flip' if best_name == 'follow' else 'follow'}@{other_pct}% "
-            f"-> tip {best_tip}"
+            f"-> tip {best_tip} num={num.get('number')}"
         ),
     }
 

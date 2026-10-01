@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
   <meta http-equiv="Pragma" content="no-cache" />
-  <title>WinGo 30 — Big / Small Live</title>
+  <title>WinGo 30 — Live Tip</title>
   <style>
     :root {
       --bg0: #0f1419;
@@ -16,6 +16,7 @@
       --big: #3dd68c;
       --small: #5b9fd4;
       --warn: #f0c14b;
+      --num: #e8c47c;
     }
     * { box-sizing: border-box; }
     body {
@@ -73,6 +74,14 @@
     }
     .BIG { color: var(--big); }
     .SMALL { color: var(--small); }
+    .num {
+      color: var(--num);
+      font-size: 2.8rem;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      margin: 0.15rem 0;
+    }
+    .alts { font-size: 0.85rem; color: var(--muted); margin-top: 0.35rem; }
     .meta { margin-top: 0.85rem; font-size: 0.85rem; color: var(--muted); line-height: 1.5; }
     .err { color: #ffb4b4; font-size: 0.9rem; }
     .dot {
@@ -93,7 +102,7 @@
 </head>
 <body>
   <main>
-    <h1>WinGo 30 — Big / Small</h1>
+    <h1>WinGo 30 — Big/Small + Number</h1>
     <p class="sub"><span class="dot" id="liveDot"></span><span id="liveText">Connecting…</span></p>
 
     <div class="card" id="box">
@@ -101,7 +110,7 @@
     </div>
 
     <footer>
-      Only Big / Small tip. Number &amp; Color disabled. Estimate only — long-run ~50% normal.
+      Big/Small + Number from last 10 rounds. Number long-run ~10% hit is normal.
     </footer>
   </main>
   <script>
@@ -117,9 +126,12 @@
       const p = d.prediction || {};
       const conf = Math.round((d.confidence || 0) * 100);
       const bs = (d.skip || d.action === "WAIT") ? "WAIT" : (p.big_small || "—");
+      const num = (p.number != null && p.number !== "") ? String(p.number) : "—";
+      const alts = (p.numbers || []).map(x => x.number + "(" + (x.pct ?? Math.round((x.probability||0)*100)) + "%)").join(" · ");
       const bsProb = Math.round((d.probabilities?.big_small || 0) * 100);
+      const numProb = d.probabilities?.number != null ? Math.round(Number(d.probabilities.number) * 100) : null;
       const left = roundCountdown();
-      const key = (d.next_period || d.period || "") + "|" + bs + "|" + (d.action || "");
+      const key = (d.next_period || d.period || "") + "|" + bs + "|" + num + "|" + (d.action || "");
       const changed = key && key !== lastKey;
       lastKey = key;
 
@@ -130,29 +142,36 @@
         <div class="label">Last settled</div>
         <div class="period" style="font-size:0.95rem;margin-bottom:0.35rem">
           ${d.current_period || "—"}
-          <span class="meta"> serial <b>${d.current_serial || "—"}</b></span>
+          <span class="meta"> serial <b>${d.current_serial || "—"}</b>
+          · last# <b>${d.analysis?.last_number ?? "—"}</b>
+          · ${(d.analysis?.last10_numbers || []).join(",") || "—"}</span>
         </div>
-        <div class="label">Next tip (Big / Small only)</div>
+        <div class="label">Next tip</div>
         <div class="period">
           ${d.next_period || d.period || "—"}
           <span class="meta"> serial <b>${d.next_serial || "—"}</b></span>
         </div>
         <div class="tip">
-          <div class="label">${d.skip ? "No clear signal" : "Prediction"}</div>
+          <div class="label">${d.skip ? "BS weak — number still shown" : "Prediction"}</div>
           <strong class="${bs === "WAIT" ? "" : bs}">${bs}</strong>
-          <div class="meta">${d.skip ? "Skipped weak/tie round" : (bsProb + "% tip share")}</div>
+          <div class="label" style="margin-top:0.7rem">Number</div>
+          <div class="num">${num}</div>
+          <div class="meta">${d.skip ? "BS skipped" : (bsProb + "% BS")}
+            ${numProb != null ? (" · num " + numProb + "% in last10") : ""}</div>
+          ${alts ? `<div class="alts">Top: ${alts}</div>` : ""}
         </div>
         <div class="meta">
           Reason: <b>${d.tip_reason || "—"}</b><br/>
-          Analysis (last <b>10</b> bets):
+          Analysis (last <b>10</b>):
           ${(d.analysis?.last10 || []).join(",") || "—"}
-          · BIG/SMALL=${d.analysis?.window_big ?? "—"}/${d.analysis?.window_small ?? "—"}
-          · streak=${d.analysis?.streak ?? "—"} ${d.analysis?.last_bs || ""}
+          · nums ${(d.analysis?.last10_numbers || []).join(",") || "—"}
           · follow ${d.analysis?.recent_follow_pct ?? "—"}%
           · flip ${d.analysis?.recent_flip_pct ?? "—"}%<br/>
           Confidence: <b>${d.confidence_level || "—"}</b> (${conf}%) · ${d.strategy || "—"}<br/>
-          Real settled BS accuracy (strong tips only):
+          Settled: BS
           <b>${d.live_accuracy?.big_small_pct != null ? Number(d.live_accuracy.big_small_pct).toFixed(1) + "%" : "—"}</b>
+          · Number
+          <b>${d.live_accuracy?.number_pct != null ? Number(d.live_accuracy.number_pct).toFixed(1) + "%" : "—"}</b>
           <span>(n=${d.live_accuracy?.sample ?? 0})</span><br/>
           Updated: ${d.generated_at || "—"}
         </div>
@@ -166,7 +185,7 @@
         : (d.generated_at ? Math.max(0, Math.floor((Date.now() - Date.parse(d.generated_at)) / 1000)) : null);
       if (age != null && age < 90) {
         dot.className = "dot";
-        liveText.textContent = `LIVE Big/Small · refresh 1s · server ${age}s ago`;
+        liveText.textContent = `LIVE BS+Number · refresh 1s · server ${age}s ago`;
       } else {
         dot.className = "dot dead";
         liveText.textContent = age == null

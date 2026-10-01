@@ -220,8 +220,8 @@ class EnsemblePredictor:
 
     def _pick_big_small(
         self, history: list[dict[str, Any]]
-    ) -> tuple[str, dict[str, float], str, bool]:
-        """Analyze past BS data first, then tip (or WAIT)."""
+    ) -> tuple[str, dict[str, float], str, bool, int | None]:
+        """Analyze past BS + number data first, then tip (or WAIT)."""
         from analysis.big_small_analyze import analyze_then_predict
 
         bundle = analyze_then_predict(history)
@@ -234,7 +234,15 @@ class EnsemblePredictor:
         skip = bool(tip.get("skip"))
         top = str(tip.get("big_small") or ("SMALL" if analysis.get("last_bs") == "BIG" else "BIG"))
         source = str(tip.get("source") or "analysis")
-        return top, _normalize({str(k): float(v) for k, v in probs.items()}), source, skip
+        tip_num = tip.get("number")
+        tip_num_i = int(tip_num) if tip_num is not None else None
+        return (
+            top,
+            _normalize({str(k): float(v) for k, v in probs.items()}),
+            source,
+            skip,
+            tip_num_i,
+        )
 
     def _pick_color(self, history: list[dict[str, Any]]) -> tuple[str, dict[str, float], str]:
         """Color kept for internal metrics only (UI is Big/Small-only)."""
@@ -428,8 +436,10 @@ class EnsemblePredictor:
             bs_source = "number_ensemble"
             conf_nums = {int(k): float(v) for k, v in number_probs.items()}
         else:
-            # Selective Big/Small (skip weak ties) + color for internal only.
-            top_big_small, maj_bs, bs_source, skip_tip = self._pick_big_small(history)
+            # Selective Big/Small (skip weak ties) + last-10 number tip.
+            top_big_small, maj_bs, bs_source, skip_tip, tip_number = self._pick_big_small(
+                history
+            )
             top_color, maj_col, color_source = self._pick_color(history)
             bs_source = f"{bs_source}+{color_source}"
             big_small_predictions = [
@@ -440,18 +450,20 @@ class EnsemblePredictor:
                 {"color": str(c), "probability": round(float(p), 6)}
                 for c, p in sorted(maj_col.items(), key=lambda x: x[1], reverse=True)
             ]
+            if tip_number is not None:
+                top_number = int(tip_number)
             side = [
                 (n, p)
                 for n, p in maj_nums.items()
                 if big_small_label(int(n)) == top_big_small
             ]
-            if side:
+            if tip_number is None and side:
                 top_number = int(max(side, key=lambda x: x[1])[0])
                 number_predictions = [
                     {"number": int(n), "probability": round(float(p), 6)}
                     for n, p in sorted(maj_nums.items(), key=lambda x: x[1], reverse=True)
                 ]
-            elif focus == "big_small":
+            elif focus == "big_small" and tip_number is None:
                 preferred = [
                     p
                     for p in number_predictions
@@ -459,7 +471,27 @@ class EnsemblePredictor:
                 ]
                 if preferred:
                     top_number = preferred[0]["number"]
+            # Keep number_predictions ordered with tip number first when set.
+            if tip_number is not None:
+                tip_meta = (getattr(self, "_last_bs_analysis", None) or {}).get("tip") or {}
+                alts = tip_meta.get("numbers") or []
+                if alts:
+                    number_predictions = [
+                        {
+                            "number": int(a["number"]),
+                            "probability": round(float(a.get("pct", 0)) / 100.0, 6),
+                        }
+                        for a in alts
+                    ]
+                else:
+                    number_predictions = [
+                        {"number": int(top_number), "probability": 0.1}
+                    ]
             conf_nums = {int(k): float(v) for k, v in maj_nums.items()}
+            if tip_number is not None:
+                conf_nums[int(top_number)] = max(
+                    conf_nums.get(int(top_number), 0.0), 0.2
+                )
 
         hist_acc = (
             historical_big_small_accuracy
@@ -553,6 +585,15 @@ def build_prediction_export(
     bs_analysis = ensemble_result.get("bs_analysis") or {}
     analysis_block = bs_analysis.get("analysis") if isinstance(bs_analysis, dict) else None
     tip_meta = bs_analysis.get("tip") if isinstance(bs_analysis, dict) else None
+    tip_number = None
+    tip_numbers: list[Any] = []
+    tip_number_pct = None
+    if isinstance(tip_meta, dict):
+        tip_number = tip_meta.get("number")
+        tip_numbers = tip_meta.get("numbers") or []
+        tip_number_pct = tip_meta.get("number_pct")
+    if tip_number is None:
+        tip_number = ensemble_result.get("top_number")
     return {
         "period": target,
         "next_period": target,
@@ -568,9 +609,14 @@ def build_prediction_export(
         else None,
         "prediction": {
             "big_small": tip_bs,
+            "number": tip_number,
+            "numbers": tip_numbers,
         },
         "probabilities": {
             "big_small": ensemble_result["big_small_probability"],
+            "number": round(float(tip_number_pct or 0) / 100.0, 4)
+            if tip_number_pct is not None
+            else ensemble_result.get("number_probability"),
         },
         "confidence": ensemble_result["confidence_score"],
         "confidence_level": ensemble_result["confidence_level"],
@@ -578,9 +624,10 @@ def build_prediction_export(
         "strategy": ensemble_result.get("bs_source"),
         "live_accuracy": {
             "big_small_pct": acc.get("big_small_accuracy"),
+            "number_pct": acc.get("number_accuracy"),
             "sample": acc.get("total_predictions"),
-            "note": "Analyze past BS first, then TIP/WAIT.",
+            "note": "Last-10 BS + number frequency tip.",
         },
         "generated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
-        "disclaimer": "Prediction comes after past Big/Small analysis only.",
+        "disclaimer": "BS + number from last-10 analysis only. Number hit~10% expected.",
     }
