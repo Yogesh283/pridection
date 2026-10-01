@@ -402,8 +402,15 @@ class AnalyzerRunner:
             "model_status": (export or {}).get("model_status"),
             "live_accuracy": (export or {}).get("live_accuracy"),
         }
+        text = json.dumps(payload, indent=2)
         path = Path(ROOT_DIR) / "live_status.json"
-        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        path.write_text(text, encoding="utf-8")
+        try:
+            public = Path(ROOT_DIR) / "public"
+            public.mkdir(parents=True, exist_ok=True)
+            (public / "live_status.json").write_text(text, encoding="utf-8")
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("public live_status mirror failed: %s", exc)
 
     def run_live(self, hours: float = 1.0) -> None:
         """

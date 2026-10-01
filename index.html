@@ -68,20 +68,28 @@
     }
     .tip strong {
       display: block;
-      font-size: 2.4rem;
+      font-size: 2.6rem;
       margin-top: 0.35rem;
       letter-spacing: 0.06em;
     }
     .BIG { color: var(--big); }
     .SMALL { color: var(--small); }
-    .num {
-      color: var(--num);
-      font-size: 2.8rem;
-      font-weight: 700;
-      letter-spacing: 0.04em;
-      margin: 0.15rem 0;
+    .WAIT, .UNAVAILABLE { color: var(--warn); }
+    .bars {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0.55rem;
+      margin-top: 0.85rem;
+      text-align: left;
     }
-    .alts { font-size: 0.85rem; color: var(--muted); margin-top: 0.35rem; }
+    .bar {
+      background: #0d1218;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 0.55rem 0.7rem;
+      font-size: 0.9rem;
+    }
+    .bar b { display: block; font-size: 1.15rem; margin-top: 0.15rem; }
     .meta { margin-top: 0.85rem; font-size: 0.85rem; color: var(--muted); line-height: 1.55; }
     .err { color: #ffb4b4; font-size: 0.9rem; }
     .dot {
@@ -110,8 +118,7 @@
     </div>
 
     <footer>
-      Live tip authority = current production model (gradient boosting family).
-      Probability is model output, not guaranteed accuracy. majority_w8 is diagnostic only.
+      Live tip from production model. Probability ≠ guaranteed accuracy.
     </footer>
   </main>
   <script>
@@ -129,30 +136,81 @@
       return Math.round((n <= 1 ? n * 100 : n));
     }
 
+    function windowAcc(live, key) {
+      const w = live && live[key];
+      if (!w || typeof w !== "object") return null;
+      const n = Number(w.big_small_scored ?? w.sample_size ?? 0);
+      const a = w.big_small_accuracy;
+      if (a == null || n < 5) return null;
+      return { acc: Number(a), n };
+    }
+
+    function tipPayload(d) {
+      // Supports:
+      // - prediction: "BIG" | "SMALL"
+      // - prediction: { big_small, number, numbers }
+      // - prediction_detail: { ... }
+      const detail = d.prediction_detail && typeof d.prediction_detail === "object"
+        ? d.prediction_detail
+        : null;
+      const raw = d.prediction;
+      if (typeof raw === "string") {
+        return {
+          big_small: raw,
+          number: detail?.number ?? null,
+          numbers: detail?.numbers || [],
+        };
+      }
+      if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+        return {
+          big_small: raw.big_small ?? detail?.big_small ?? null,
+          number: raw.number ?? detail?.number ?? null,
+          numbers: raw.numbers || detail?.numbers || [],
+        };
+      }
+      return {
+        big_small: detail?.big_small ?? null,
+        number: detail?.number ?? null,
+        numbers: detail?.numbers || [],
+      };
+    }
+
     function render(d, status) {
       const box = document.getElementById("box");
-      const p = (typeof d.prediction === "object")
-        ? (d.prediction || {})
-        : (d.prediction_detail || { big_small: d.prediction });
+      const p = tipPayload(d);
       const conf = pct(d.confidence) ?? 0;
-      const unavailable = d.action === "PREDICTION_UNAVAILABLE" || d.status === "PREDICTION_UNAVAILABLE";
-      const bs = unavailable
-        ? "UNAVAILABLE"
-        : ((d.skip || d.action === "WAIT") ? "WAIT" : (p.big_small || "—"));
+      const unavailable =
+        d.action === "PREDICTION_UNAVAILABLE" ||
+        d.status === "PREDICTION_UNAVAILABLE" ||
+        String(d.decision_strategy || "").toUpperCase() === "PREDICTION_UNAVAILABLE";
+      let bs = "—";
+      if (unavailable) bs = "UNAVAILABLE";
+      else if (d.skip || d.action === "WAIT") bs = "WAIT";
+      else if (p.big_small) bs = String(p.big_small).toUpperCase();
+
       const num = (p.number != null && p.number !== "") ? String(p.number) : "—";
-      const alts = (p.numbers || []).map(x => x.number + "(" + (x.pct ?? Math.round((x.probability||0)*100)) + "%)").join(" · ");
       const pBig = pct(d.probability_big ?? d.probabilities?.probability_big);
       const pSmall = pct(d.probability_small ?? d.probabilities?.probability_small);
-      const bsProb = pct(d.probabilities?.big_small) ?? conf;
-      const numProb = d.probabilities?.number != null ? pct(d.probabilities.number) : null;
+      const tipProb = pct(d.probabilities?.big_small) ?? conf;
       const model = d.model_name || d.decision_strategy || d.strategy || "—";
       const version = d.model_version || "—";
       const trained = d.trained_on_rows ?? d.trained_rows ?? "—";
-      const mstat = d.model_status?.model_status || d.model_status?.status || status?.model_status?.model_status || "—";
-      const liveBs = d.live_accuracy?.big_small_pct;
-      const liveN = d.live_accuracy?.sample ?? 0;
+      const mstat =
+        (typeof d.model_status === "string" ? d.model_status : null) ||
+        d.model_status?.model_status ||
+        d.model_status?.status ||
+        status?.model_status?.model_status ||
+        d.status ||
+        "—";
+      const live = d.live_accuracy || {};
+      const liveBs = live.big_small_pct;
+      const liveN = live.sample ?? live.big_small_scored ?? 0;
+      const w10 = windowAcc(live, "last_10");
+      const w25 = windowAcc(live, "last_25");
+      const w50 = windowAcc(live, "last_50");
       const left = roundCountdown();
-      const key = (d.next_period || d.period || "") + "|" + bs + "|" + num + "|" + (d.action || "");
+      const period = d.next_period || d.target_period || d.period || "—";
+      const key = period + "|" + bs + "|" + (d.action || "");
       const changed = key && key !== lastKey;
       lastKey = key;
 
@@ -163,35 +221,36 @@
         <div class="label">Last settled</div>
         <div class="period" style="font-size:0.95rem;margin-bottom:0.35rem">
           ${d.current_period || "—"}
-          <span class="meta"> serial <b>${d.current_serial || "—"}</b>
-          · last# <b>${d.analysis?.last_number ?? "—"}</b></span>
+          <span class="meta"> serial <b>${d.current_serial || "—"}</b></span>
         </div>
-        <div class="label">Next tip</div>
+        <div class="label">Next tip period</div>
         <div class="period">
-          ${d.next_period || d.target_period || d.period || "—"}
+          ${period}
           <span class="meta"> serial <b>${d.next_serial || "—"}</b></span>
         </div>
         <div class="tip">
-          <div class="label">${unavailable ? "Model status" : (d.skip ? "BS weak / WAIT" : "Prediction")}</div>
-          <strong class="${(bs === "BIG" || bs === "SMALL") ? bs : ""}">${bs}</strong>
-          <div class="meta" style="margin-top:0.55rem">
-            ${pBig != null && pSmall != null
-              ? (`BIG <b>${pBig}%</b> · SMALL <b>${pSmall}%</b>`)
-              : (unavailable ? (d.tip_reason || "unavailable") : (bsProb + "% tip side"))}
+          <div class="label">Prediction (Big / Small)</div>
+          <strong class="${bs}">${bs}</strong>
+          <div class="bars">
+            <div class="bar">BIG<b class="BIG">${pBig != null ? pBig + "%" : "—"}</b></div>
+            <div class="bar">SMALL<b class="SMALL">${pSmall != null ? pSmall + "%" : "—"}</b></div>
           </div>
-          <div class="label" style="margin-top:0.7rem">Number</div>
-          <div class="num">${num}</div>
-          <div class="meta">${numProb != null ? ("num " + numProb + "%") : "number is secondary"}</div>
-          ${alts ? `<div class="alts">Top: ${alts}</div>` : ""}
+          <div class="meta" style="margin-top:0.65rem">
+            Tip side chance: <b>${tipProb}%</b>
+            · Number: <b class="num" style="font-size:1rem">${num}</b>
+          </div>
         </div>
         <div class="meta">
           Model: <b>${model}</b><br/>
-          Version: <b>${version}</b> · Trained rows: <b>${trained}</b> · Status: <b>${mstat}</b><br/>
+          Version: <b>${version}</b> · Trained: <b>${trained}</b> · Status: <b>${mstat}</b><br/>
           Confidence: <b>${d.confidence_level || "—"}</b> (${conf}%)<br/>
           Live accuracy:
           <b>${liveBs != null && Number(liveN) >= 5 ? Number(liveBs).toFixed(1) + "%" : "n/a"}</b>
-          <span>(resolved n=${liveN})</span><br/>
-          Reason: <b>${d.tip_reason || "—"}</b><br/>
+          (n=${liveN})
+          ${w10 ? ` · L10 ${w10.acc.toFixed(0)}%` : ""}
+          ${w25 ? ` · L25 ${w25.acc.toFixed(0)}%` : ""}
+          ${w50 ? ` · L50 ${w50.acc.toFixed(0)}%` : ""}
+          <br/>
           Updated: ${d.prediction_timestamp || d.generated_at || "—"}
         </div>
       `;
@@ -202,35 +261,63 @@
       const age = status?.server_time
         ? Math.max(0, Math.floor(Date.now() / 1000 - status.server_time))
         : (d.generated_at ? Math.max(0, Math.floor((Date.now() - Date.parse(d.generated_at)) / 1000)) : null);
-      if (age != null && age < 90) {
+      if (age != null && age < 120) {
         dot.className = "dot";
-        liveText.textContent = `LIVE · ${model} · refresh 1s · server ${age}s ago`;
+        liveText.textContent = `LIVE · ${bs} · ${model} · ${age}s ago`;
       } else {
         dot.className = "dot dead";
         liveText.textContent = age == null
-          ? "Waiting for live worker…"
-          : `LIVE stalled (${age}s) — restart main.py --live 0`;
+          ? "Waiting for prediction.json…"
+          : `Stalled (${age}s) — run: python -u main.py --live 0`;
       }
+    }
+
+    async function fetchJson(url) {
+      const res = await fetch(url, { cache: "no-store" });
+      if (!res.ok) throw new Error(url.split("?")[0] + " missing (" + res.status + ")");
+      return res.json();
     }
 
     async function load() {
       try {
         const bust = "ts=" + Date.now();
-        const [predRes, statusRes] = await Promise.all([
-          fetch("prediction.json?" + bust, { cache: "no-store" }),
-          fetch("live_status.json?" + bust, { cache: "no-store" }).catch(() => null),
-        ]);
-        if (!predRes.ok) throw new Error("prediction.json missing — start auto live on server");
-        const d = await predRes.json();
+        // Try root first, then /public/ (some hosts use public docroot).
+        let d = null;
         let status = null;
-        if (statusRes && statusRes.ok) {
-          try { status = await statusRes.json(); } catch (_) {}
+        const predPaths = [
+          "prediction.json?" + bust,
+          "public/prediction.json?" + bust,
+        ];
+        let lastErr = null;
+        for (const path of predPaths) {
+          try {
+            d = await fetchJson(path);
+            break;
+          } catch (e) {
+            lastErr = e;
+          }
+        }
+        if (!d) throw lastErr || new Error("prediction.json missing");
+
+        for (const path of ["live_status.json?" + bust, "public/live_status.json?" + bust]) {
+          try {
+            status = await fetchJson(path);
+            break;
+          } catch (_) {}
+        }
+        // Prefer embedded prediction from live_status if fresher.
+        if (status?.prediction && typeof status.prediction === "object") {
+          const nest = status.prediction;
+          if (nest.prediction != null || nest.prediction_detail || nest.probability_big != null) {
+            d = { ...d, ...nest };
+          }
         }
         render(d, status);
       } catch (e) {
         document.getElementById("box").innerHTML =
           `<div class="err">${e.message}</div>
-           <div class="meta">Server:<br/><code>python -u main.py --live 0</code></div>`;
+           <div class="meta">Server path:<br/><code>/home/rmsurveyai/htdocs/rmsurveyai.com</code><br/>
+           Start: <code>python -u main.py --live 0</code></div>`;
         document.getElementById("liveDot").className = "dot dead";
         document.getElementById("liveText").textContent = "Offline";
       }

@@ -16,6 +16,7 @@ from config import (
     PREDICTION_FOCUS,
     PREDICTION_JSON_PATH,
     PREDICTION_MODEL,
+    ROOT_DIR,
 )
 from models.predictor import (
     FrequencyModel,
@@ -837,7 +838,21 @@ def write_prediction_json(
 ) -> Path:
     out = Path(path) if path else Path(PREDICTION_JSON_PATH)
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    text = json.dumps(payload, indent=2)
+    out.write_text(text, encoding="utf-8")
+    # Mirror for hosts that serve from public/ docroot.
+    try:
+        public = ROOT_DIR / "public"
+        public.mkdir(parents=True, exist_ok=True)
+        (public / "prediction.json").write_text(text, encoding="utf-8")
+        # Keep a copy of index next to the JSON for static hosting.
+        src_index = ROOT_DIR / "index.html"
+        if src_index.exists():
+            (public / "index.html").write_text(
+                src_index.read_text(encoding="utf-8"), encoding="utf-8"
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("public prediction mirror failed: %s", exc)
     return out
 
 
